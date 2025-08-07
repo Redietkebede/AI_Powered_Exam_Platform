@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
+import pool from './config/db';
 
 dotenv.config();
 
@@ -18,7 +19,18 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 // Test route
 app.get('/', (_req, res) => res.send('API is working!'));
 
+app.get('/db-test', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({ connected: true, time: result.rows[0].now });
+  } catch (err: any) {
+    console.error('DB test failed:', err.message);
+    res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
