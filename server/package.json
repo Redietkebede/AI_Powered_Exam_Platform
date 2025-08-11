@@ -7,7 +7,9 @@
     "firebase-admin": "^13.4.0",
     "helmet": "^8.1.0",
     "morgan": "^1.10.1",
-    "pg": "^8.16.3"
+    "openai": "^5.12.2",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

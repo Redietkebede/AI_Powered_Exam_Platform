@@ -1,8 +1,8 @@
+import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import dotenv from "dotenv";
 import pool from "./config/db";
 
 import { verifyToken } from "./middleware/verifyToken";
@@ -50,11 +50,11 @@ app.get("/api/exams/start", verifyToken, (req: AuthRequest, res) => {
   res.send(`User ${firebaseUid} started the exam.`);
 });
 
+app.use('/api/questions', questionsRoutes);
 
-app.use("/api", protectedRoutes);
+app.use("/api/", protectedRoutes);
 app.use('/api/exams', examsRoutes);
 app.use('/api/me', meRoutes);
-app.use('/api/questions', questionsRoutes);
 
 app.use(
   (

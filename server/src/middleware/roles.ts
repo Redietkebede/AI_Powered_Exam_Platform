@@ -2,7 +2,6 @@ import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db'; 
 import { AuthRequest } from '../types/AuthRequest';
 
-// attach `req.userRole` for convenience
 declare global {
   namespace Express {
     interface Request {
@@ -11,10 +10,6 @@ declare global {
   }
 }
 
-/**
- * Loads the user's role from DB based on Firebase UID and attaches to req.userRole.
- * Call this AFTER verifyFirebaseToken.
- */
 export async function attachUserRole(req: AuthRequest, res: Response, next: NextFunction) {
   try {
     const uid = req.user?.uid;
@@ -33,10 +28,6 @@ export async function attachUserRole(req: AuthRequest, res: Response, next: Next
   }
 }
 
-/**
- * Restrict access to allowed roles.
- * Usage: router.post('/x', verifyFirebaseToken, attachUserRole, restrictTo('admin','editor'), handler)
- */
 export function restrictTo(...allowed: string[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.userRole) return res.status(401).json({ error: 'Unauthorized' });

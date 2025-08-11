@@ -1,11 +1,11 @@
-import express from 'express';
-import { verifyToken } from '../middleware/verifyToken';
-import { restrictTo } from '../middleware/roles';
-import * as Questions from '../controllers/questionControllers';
+import { Router } from "express";
+import { createQuestions, listQuestions } from "../controllers/questionControllers";
+import { verifyToken } from "../middleware/auth"; // your guard
 
-const router = express.Router();
+const router = Router();
+router.get('/ping', (_req, res) => res.json({ ok: true }));
 
-router.post('/', verifyToken, restrictTo('admin','editor'), Questions.create);
-router.get('/', verifyToken, restrictTo('admin','editor'), Questions.list);
+router.get("/", verifyToken, listQuestions);
 
+router.post("/generate", verifyToken, createQuestions);
 export default router;
