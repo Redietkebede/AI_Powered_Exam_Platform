@@ -1,9 +1,10 @@
 import admin from "../config/firebase";
 import pool from "../config/db";
-import { Request, Response, NextFunction } from "express";
+import { Response, NextFunction } from "express";
+import { AuthRequest } from "../types/AuthRequest";
 
 export async function verifyToken(
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ) {
