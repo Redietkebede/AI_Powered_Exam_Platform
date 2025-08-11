@@ -4,8 +4,13 @@ import * as dotenv from 'dotenv';
 
 dotenv.config();
 
-admin.initializeApp({
-  credential: admin.credential.cert(service_account as admin.ServiceAccount),
-});
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(service_account as admin.ServiceAccount),
+    projectId: (service_account as any).project_id, // explicit, helps avoid mismatches
+  });
+}
 
+
+export default admin;
 export const auth = admin.auth();
