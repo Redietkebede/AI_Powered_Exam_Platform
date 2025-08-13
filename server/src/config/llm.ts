@@ -8,6 +8,10 @@ for (const k of required) {
 export const llm = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY!,
   baseURL: process.env.LLM_BASE_URL!, // lets you swap OpenRouter/local easily
+  defaultHeaders: {
+    "HTTP-Referer": "http://localhost:2800",
+    "X-Title": "AI-Powered Exam Platform",
+  },
 });
 
 export const LLM_MODEL = process.env.LLM_MODEL!;

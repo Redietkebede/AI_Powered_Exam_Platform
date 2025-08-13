@@ -25,42 +25,47 @@ const llm = new OpenAI({
 
 // ---- types & schema ----
 export const MCQSchema = z.object({
-  stem: z.string().min(1),
-  choices: z.array(z.string()).length(4),
-  answerIndex: z.number().int().min(0).max(3),
-  explanation: z.string().min(1),
-  tags: z.array(z.string()).min(0).max(5).optional(),
-  difficulty: z.number().int().min(1).max(5).optional(),
+  question_text: z.string().min(5),
+  options: z.array(z.string()).length(4), // exactly 4 choices
+  correct_answer: z.number().int().min(0).max(3), // 0..3 maps to A..D
+  explanation: z.string().optional().nullable().default(null),
+  tags: z.array(z.string()).default([]),
 });
 
-const SingleSchema = z.object({
-  topic: z.string(),
-  difficulty: z.coerce.number().int().min(1).max(5),
-  questions: z.array(MCQSchema).min(1),
+export const ExamJSONSchema = z.object({
+  topic: z.string().min(2),
+  difficulty: z.number().int().min(1).max(5),
+  questions: z.array(MCQSchema).min(1).max(50),
 });
-
-const MultiSchema = z.object({
-  topic: z.string(),
-  difficulties: z.array(z.coerce.number().int().min(1).max(5)).length(1),
-  total: z.number().int().positive().optional(),
-  questions: z.array(MCQSchema).min(1),
-}).transform(o => ({
-  topic: o.topic,
-  difficulty: o.difficulties[0],   // normalize to single value
-  questions: o.questions,
-}));
-
-
-export const ExamJSONSchema = z.union([SingleSchema, MultiSchema]);
 export type MCQ = z.infer<typeof MCQSchema>;
 export type ExamJSON = z.infer<typeof ExamJSONSchema>;
 
 // ---- helpers ----
 function coerceJSON(text: string): string {
-  // Strip accidental fences or prose if the model slips
-  // Keep only first {...} or [...] block found.
-  const m = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  return m ? m[1] : text;
+  let s = (text ?? "").trim();
+
+  // strip code fences
+  s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+
+  // If it's a JS-style concatenated string:  "....\n" + "...."
+  if (/^["'`]/.test(s) && /["'`]\s*\+\s*["'`]/.test(s)) {
+    // remove the concatenation operators and outer quotes
+    s = s
+      .replace(/^\s*["'`]/, "")
+      .replace(/["'`]\s*\+\s*["'`]/g, "")
+      .replace(/["'`]\s*$/, "");
+
+    // it may now be an escaped JSON string → unescape once
+    try {
+      s = JSON.parse(s);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // finally, extract the first {...} or [...] block
+  const m = s.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+  return m ? m[1] : s;
 }
 
 // Helper: pick a random temp in the range
@@ -71,18 +76,33 @@ function getRandomTemp(min = TEMP_MIN, max = TEMP_MAX) {
 // ---- main API ----
 
 async function callLLM(content: string, temperature: number) {
-  return llm.chat.completions.create({
-    model: LLM_MODEL as string,
-    temperature,
-    messages: [
-      {
-        role: "system",
-        content:
-          "Return ONLY strict JSON. No code fences, no markdown, no commentary. If unsure, output an empty valid JSON object.",
-      },
-      { role: "user", content },
-    ],
-  });
+  try {
+    return await llm.chat.completions.create({
+      model: LLM_MODEL as string,
+      temperature,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Return ONLY a valid JSON object with keys: topic, difficulty, questions[]. " +
+            "Each question must have: question_text, options (exactly 4 strings), correct_answer (1), explanation (optional), tags (array). " +
+            "No code fences. No comments. No string concatenation."
+        },
+        { role: "user", content },
+      ],
+    });
+  } catch (e: any) {
+    console.error("[LLM] HTTP error", {
+      status: e?.status ?? e?.response?.status,
+      data: e?.response?.data ?? e?.message ?? String(e),
+    });
+    // surface a useful status upstream
+    const err = new Error(
+      e?.response?.data?.error?.message || e?.message || "LLM request failed"
+    ) as any;
+    err.status = e?.status || e?.response?.status || 502;
+    throw err;
+  }
 }
 
 export async function generateQuestions(
@@ -90,7 +110,7 @@ export async function generateQuestions(
   difficulty: Difficulty,
   count = 5
 ) {
- const userContent = examPrompt(topic, difficulty, count);
+  const userContent = examPrompt(topic, difficulty, count);
 
   // 1) LLM call
   const resp = await callLLM(userContent, getRandomTemp());
@@ -102,27 +122,40 @@ export async function generateQuestions(
   try {
     parsed = JSON.parse(cleaned);
   } catch (error) {
-    logBadGen("json-parse-error", { topic, difficulty, count, cleaned, error: String(error) });
-    throw new Error("LLM returned non‑JSON content");
+    console.error("[LLM] json-parse-error", { cleaned, error: String(error) });
+    throw new Error("LLM returned non-JSON content");
   }
 
   // 3) Validate schema — log if it fails
   const result = ExamJSONSchema.safeParse(parsed);
   if (!result.success) {
     logBadGen("schema-validation-failed", {
-      topic, difficulty, count,
+      topic,
+      difficulty,
+      count,
       cleaned,
-      zod: result.error.flatten()
+      zod: result.error.flatten(),
+    });
+    const issues = result.error.issues.map((i) => ({
+      path: i.path.join("."),
+      message: i.message,
+    }));
+    console.error("[LLM] schema-validation-failed", {
+      topic,
+      difficulty,
+      count,
+      preview: cleaned.slice(0, 1200),
+      issues,
     });
     throw new Error("LLM JSON failed schema validation");
   }
 
-  // 4) (optional) normalize to exactly 4 choices + clamp index
+  // 4) (optional) normalize to exactly 4 options + clamp index
   const payload = result.data;
-  payload.questions = payload.questions.map(q => {
-    const choices = q.choices.slice(0, 4);
-    const answerIndex = Math.max(0, Math.min(3, q.answerIndex));
-    return { ...q, choices, answerIndex };
+  payload.questions = payload.questions.map((q) => {
+    const options = q.options.slice(0, 4);
+    const correct_answer = Math.max(0, Math.min(3, q.correct_answer));
+    return { ...q, options, correct_answer };
   });
 
   return payload;

@@ -1,3 +1,4 @@
+import type {} from "./types/express";
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
@@ -6,7 +7,7 @@ import rateLimit from "express-rate-limit";
 import pool from "./config/db";
 
 import { verifyToken } from "./middleware/verifyToken";
-import { AuthRequest } from "./types/AuthRequest";
+import { RequestHandler } from "express";
 import protectedRoutes from "./routes/protectedRoutes";
 import morgan from "morgan";
 import examsRoutes from './routes/examRoutes';
@@ -45,10 +46,7 @@ app.get("/db-test", async (req, res) => {
     res.status(500).json({ connected: false, error: err.message });
   }
 });
-app.get("/api/exams/start", verifyToken, (req: AuthRequest, res) => {
-  const firebaseUid = req.user!.firebaseUid;
-  res.send(`User ${firebaseUid} started the exam.`);
-});
+app.get("/api/exams/start");
 
 app.use('/api/questions', questionsRoutes);
 

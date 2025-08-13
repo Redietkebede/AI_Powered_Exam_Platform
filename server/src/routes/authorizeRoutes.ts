@@ -1,20 +1,15 @@
 import { Router } from "express";
-import { verifyToken } from "../middleware/auth"; // your strict auth.ts
+import { verifyToken } from "../middleware/auth";      // your strict auth.ts
 import { authorize, atLeast } from "../middleware/authorize";
-import {
-  createQuestions,
-  listQuestions,
-  deleteQuestion,
-  publishQuestion
-} from "../controllers/questionControllers";
+import { createQuestions, listQuestions, deleteQuestion,publishQuestion } from "../controllers/questionControllers";
 
 const router = Router();
 
-// Only editor can generate questions
+// Only admin/editor can generate questions
 router.post(
-  "/generate",
+  "/api/questions/generate",
   verifyToken,
-  authorize(["editor"]),
+  authorize(["admin", "editor"]),
   createQuestions
 );
 
@@ -30,7 +25,7 @@ router.get(
 router.delete(
   "/api/questions/:id",
   verifyToken,
-  authorize(["admin", "editor"]),
+  authorize(["admin"]),
   deleteQuestion
 );
 

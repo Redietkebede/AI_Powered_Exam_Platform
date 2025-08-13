@@ -7,8 +7,8 @@ You are an expert exam item writer.
 Generate ${count} multiple‑choice questions about "${topic}" at difficulty ${difficulty}.
 
 Rules:
-- EXACTLY 4 choices (A–D), one correct answer.
-- Provide "answerIndex" (0..3) and a concise "explanation".
+- EXACTLY 4 options (A–D), one correct answer.
+- Provide "correct_answer" (0..3) and a concise "explanation".
 - Add 1–3 topical "tags".
 - Return ONLY ONE JSON object. No markdown, no backticks, no extra keys.
 
@@ -18,9 +18,9 @@ JSON to produce:
   "difficulty": ${difficulty},
   "questions": [
     {
-      "stem": "string",
-      "choices": ["string","string","string","string"],
-      "answerIndex": 0,
+      "question_text": "string",
+      "options": ["string","string","string","string"],
+      "correct_answer": 0,
       "explanation": "string",
       "tags": ["string","string"]
     }

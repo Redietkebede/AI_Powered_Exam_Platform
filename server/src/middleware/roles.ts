@@ -1,7 +1,5 @@
-import { Request, Response, NextFunction } from 'express';
+import { RequestHandler } from 'express';
 import pool from '../config/db'; 
-import { AuthRequest } from '../types/AuthRequest';
-
 declare global {
   namespace Express {
     interface Request {
@@ -10,7 +8,7 @@ declare global {
   }
 }
 
-export async function attachUserRole(req: AuthRequest, res: Response, next: NextFunction) {
+export const attachUserRole: RequestHandler = async (req, res, next) => {
   try {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: 'Unauthorized' });
@@ -28,8 +26,8 @@ export async function attachUserRole(req: AuthRequest, res: Response, next: Next
   }
 }
 
-export function restrictTo(...allowed: string[]) {
-  return (req: Request, res: Response, next: NextFunction) => {
+export const restrictTo = (...allowed: string[]): RequestHandler => {
+  return (req, res, next) => {
     if (!req.userRole) return res.status(401).json({ error: 'Unauthorized' });
     if (!allowed.includes(req.userRole)) {
       return res.status(403).json({ error: `Forbidden: requires role ${allowed.join(' or ')}` });

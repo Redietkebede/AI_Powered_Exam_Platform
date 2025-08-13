@@ -1,16 +1,16 @@
-// src/middleware/verifyToken.ts
 import admin from "../config/firebase";
 import pool from "../config/db";
-import { Response, NextFunction } from "express";
-import { AuthRequest } from "../types/AuthRequest";
+import { RequestHandler } from "express";
 
-export async function verifyToken(req: AuthRequest, res: Response, next: NextFunction) {
+export const verifyToken: RequestHandler = async (req, res, next) => {
   try {
-    const hdr = (req.headers.authorization || "").trim();
-    if (!hdr.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing or invalid Authorization header" });
+    const hdr = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
+    if (!hdr) {
+      return res
+        .status(401)
+        .json({ error: "Missing or invalid Authorization header" });
     }
-    const idToken = hdr.slice("Bearer ".length).trim();
+    const idToken = hdr[1];
 
     // 1) Verify Firebase ID token
     const decoded = await admin.auth().verifyIdToken(idToken);
@@ -20,11 +20,14 @@ export async function verifyToken(req: AuthRequest, res: Response, next: NextFun
       "SELECT id, role FROM users WHERE firebase_uid = $1 LIMIT 1",
       [decoded.uid]
     );
+   
 
     // 3) If not found, provision only when email exists
     if (!result.rowCount) {
       if (!decoded.email) {
-        return res.status(403).json({ error: "Email required to provision user" });
+        return res
+          .status(403)
+          .json({ error: "Email required to provision user" });
       }
       const name = decoded.name ?? decoded.email.split("@")[0];
       // role default = candidate; tweak if you need admin/instructor bootstrap
@@ -43,6 +46,11 @@ export async function verifyToken(req: AuthRequest, res: Response, next: NextFun
           [decoded.uid]
         );
       }
+
+      if (result.rowCount === 0) {
+        // extremely unlikely, but bail clearly
+        return res.status(500).json({ error: "User provisioning failed" });
+      }
     }
 
     // 4) Attach user to req (note: no 'uid' field unless you added it to your type)
@@ -51,6 +59,7 @@ export async function verifyToken(req: AuthRequest, res: Response, next: NextFun
       id: result.rows[0].id,
       role: result.rows[0].role,
       firebaseUid: decoded.uid,
+      email: decoded.email ?? null,
       token: decoded,
     };
 
@@ -59,4 +68,4 @@ export async function verifyToken(req: AuthRequest, res: Response, next: NextFun
     console.error("[auth] verifyToken error:", err);
     return res.status(403).json({ error: "Unauthorized or token expired" });
   }
-}
+};

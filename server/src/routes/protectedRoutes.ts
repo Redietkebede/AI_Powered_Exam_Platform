@@ -1,16 +1,15 @@
+import express, { RequestHandler } from "express";
 import { verifyToken } from "../middleware/verifyToken";
-import express from "express";
-import { AuthRequest } from "../types/AuthRequest";
 
 const router = express.Router();
-
-// Only authenticated users can access this route
-router.get('/dashboard', verifyToken, (req: AuthRequest, res) => {
+const dashboard: RequestHandler = (req, res) => {
   if (req.user) {
-    res.send(`Welcome user with UID: ${req.user.uid}`);
+    res.send(`Welcome user with UID: ${req.user!.uid}`);
   } else {
     res.status(401).send('Unauthorized');
   }
-});
+};
+
+router.get("/dashboard", verifyToken, dashboard);
 
 export default router;
