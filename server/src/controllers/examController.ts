@@ -1,18 +1,22 @@
-import { Response } from "express";
+import { RequestHandler } from "express";
 import pool from "../config/db";
 import { adaptiveEngine } from "../services/adaptive"; // bayesian engine
 import { updateElo } from "../services/elo";
 import { ensureUser } from "../controllers/meControllers";
-import { AuthRequest } from "../types/AuthRequest";
 
-export async function startExam(req: AuthRequest, res: Response) {
+export const startExam: RequestHandler = async (req, res) => {
+  const { firebaseUid } = req.user!; // now typed
+  res.send(`User ${firebaseUid} started the exam.`);
   try {
     // Auth guard
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
     // Body & guard rails
-    const { testId, examId } = (req.body || {}) as { testId?: number; examId?: number };
+    const { testId, examId } = (req.body || {}) as {
+      testId?: number;
+      examId?: number;
+    };
     const inputTestId = testId ?? examId;
     if (!inputTestId) {
       return res.status(400).json({ error: "Missing required testId" });
@@ -23,10 +27,14 @@ export async function startExam(req: AuthRequest, res: Response) {
       await client.query("BEGIN");
 
       // 1) Validate test exists
-      const t = await client.query(`SELECT id FROM tests WHERE id = $1`, [inputTestId]);
+      const t = await client.query(`SELECT id FROM tests WHERE id = $1`, [
+        inputTestId,
+      ]);
       if (!t.rowCount) {
         await client.query("ROLLBACK");
-        return res.status(404).json({ error: `Test not found (id=${inputTestId})` });
+        return res
+          .status(404)
+          .json({ error: `Test not found (id=${inputTestId})` });
       }
 
       // 2) Validate test has linked questions
@@ -36,7 +44,9 @@ export async function startExam(req: AuthRequest, res: Response) {
       );
       if (qcount.rows[0].c === 0) {
         await client.query("ROLLBACK");
-        return res.status(400).json({ error: `Test ${inputTestId} has no questions` });
+        return res
+          .status(400)
+          .json({ error: `Test ${inputTestId} has no questions` });
       }
 
       // 3) Create session with total_questions
@@ -63,7 +73,9 @@ export async function startExam(req: AuthRequest, res: Response) {
       );
 
       await client.query("COMMIT");
-      return res.status(201).json({ sessionId, testId: inputTestId, totalQuestions });
+      return res
+        .status(201)
+        .json({ sessionId, testId: inputTestId, totalQuestions });
     } catch (err: any) {
       await client.query("ROLLBACK");
       console.error("startExam tx error:", err);
@@ -75,9 +87,9 @@ export async function startExam(req: AuthRequest, res: Response) {
     console.error("startExam error:", err);
     return res.status(500).json({ error: err.message || "Server error" });
   }
-}
+};
 
-export async function getNextQuestion(req: AuthRequest, res: Response) {
+export const getNextQuestion: RequestHandler = async (req, res) => {
   const uid = req.user!.uid;
   const { sessionId } = req.body as { sessionId: number };
 
@@ -120,8 +132,8 @@ export async function getNextQuestion(req: AuthRequest, res: Response) {
       `
       SELECT
         q.id,
-        q.question_text  AS stem,
-        q.options        AS choices,
+        q.question_text  AS question_text,
+        q.options        AS options,
         q.correct_answer AS correct,
         q.difficulty
       FROM questions q
@@ -145,8 +157,8 @@ export async function getNextQuestion(req: AuthRequest, res: Response) {
     return res.json({
       question: {
         id: q.id,
-        stem: q.stem,
-        choices: q.choices, // JSONB {A,B,C,D}
+        question_text: q.question_text,
+        options: q.options, // JSONB {A,B,C,D}
         difficulty: q.difficulty,
       },
     });
@@ -154,9 +166,9 @@ export async function getNextQuestion(req: AuthRequest, res: Response) {
     console.error("getNextQuestion error:", e);
     return res.status(500).json({ error: e.message });
   }
-}
+};
 
-export async function submitAnswer(req: AuthRequest, res: Response) {
+export const submitAnswer: RequestHandler = async (req, res) => {
   const uid = req.user!.uid;
   const { sessionId, questionId, selected, timeTakenSeconds } = req.body;
 
@@ -214,9 +226,9 @@ export async function submitAnswer(req: AuthRequest, res: Response) {
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
-}
+};
 
-export async function submitExam(req: AuthRequest, res: Response) {
+export const submitExam: RequestHandler = async (req, res) => {
   const uid = req.user!.uid;
   const { sessionId } = req.body as { sessionId: number };
 
@@ -275,4 +287,4 @@ export async function submitExam(req: AuthRequest, res: Response) {
     console.error("submitExam error:", e);
     return res.status(500).json({ error: e.message });
   }
-}
+};

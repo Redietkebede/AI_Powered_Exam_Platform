@@ -1,17 +1,16 @@
 import type { DecodedIdToken } from "firebase-admin/auth";
 
-declare global {
-  namespace Express {
-    interface UserPayload {
-      uid: any;
+declare module "express-serve-static-core" {
+  interface Request {
+    user?: {
       id: number;
-      role: string;
+      uid: string;
+      role: "admin" | "editor" | "recruiter" | "candidate";
       firebaseUid: string;
-      token: DecodedIdToken;
-    }
-    interface Request {
-      user?: UserPayload;
-    }
+      email?: string | null;
+      token?: DecodedIdToken;
+    };
   }
 }
+
 export {};

@@ -1,9 +1,9 @@
 import express from 'express';
-import { verifyFirebaseToken } from '../middleware/verifyToken';
+import { verifyToken } from '../middleware/verifyToken';
 import { me } from '../controllers/meControllers';
 
 const router = express.Router();
 
-router.get('/me', verifyFirebaseToken, me);
+router.get('/me', verifyToken, me);
 
 export default router;

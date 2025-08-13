@@ -1,7 +1,9 @@
-import { Request, Response } from 'express';
+import type { RequestHandler} from 'express';
 import pool from '../config/db';
 
-export async function ensureUser(firebaseUid: string, email?: string | null, displayName?: string | null) {
+export const ensureUser: RequestHandler = async (req, res, next) => {
+  const { firebaseUid, email, displayName } = req.body;
+
   // Prefer display name, then email prefix, then "User"
   let name =
     (displayName && displayName.trim()) ||
@@ -22,7 +24,7 @@ export async function ensureUser(firebaseUid: string, email?: string | null, dis
   return rows[0].id as number;
 }
 
-export async function me(req: Request, res: Response) {
+export const me: RequestHandler = async (req, res) => {
   try {
     const decoded: any = (req as any).user; // set by verifyFirebaseToken
     if (!decoded?.uid) {
