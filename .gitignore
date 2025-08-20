@@ -1,5 +1,9 @@
 # Firebase secrets
 server/firebase-adminsdk.json
 
+# dotenv
 .env
 .env.*
+!.env.example
+**/.env
+**/.env.*
