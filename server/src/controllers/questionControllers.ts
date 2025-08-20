@@ -1,15 +1,12 @@
-import { z } from "zod";
+import { number, z } from "zod";
 import { RequestHandler } from "express";
 import { generateQuestions } from "../services/examStructure";
 import { insertQuestion, getQuestions } from "../config/qustionsMiddleware";
 import pool from "../config/db";
-
 const ReqSchema = z
   .object({
     topic: z.string().min(2, "topic is required"),
-    // coerce makes "3" -> 3 so Postman strings won't fail
     difficulty: z.coerce.number().int().min(1).max(5).default(3),
-    // if you were sending numberOfQuestions before, support both:
     count: z.coerce.number().int().min(1).max(50).default(5),
   })
   .or(
@@ -38,41 +35,115 @@ const DeleteSchema = z.object({
 
 export const createQuestions: RequestHandler = async (req, res) => {
   try {
-
-
     const { topic, difficulty, count } = ReqSchema.parse(req.body);
 
     const payload = await generateQuestions(
       topic,
       difficulty as 1 | 2 | 3 | 4 | 5,
-      count
+      count,
     );
-    const LETTERS = ["A", "B", "C", "D"] as const;
 
-    const rows = payload.questions.map((q) => {
-      const opts = q.options.slice(0, 4);
-      const idx = Math.max(0, Math.min(3, Number((q as any).answerIndex ?? 0)));
-      return {
-        topic: payload.topic,
-        question_text: q.question_text,
-        options: opts, // array here; we stringify in DB layer
-        correct_answer: LETTERS[idx],
-        difficulty: payload.difficulty,
-        tags: Array.isArray(q.tags)
-          ? q.tags
-          : typeof q.tags === "string"
-          ? JSON.parse(q.tags)
-          : [],
-        explanation: Array.isArray(q.explanation)
-          ? q.explanation
-          : q.explanation
+    // WRITE model: match exactly what insertMany expects
+    type InsertQuestionRow = {
+      topic: string;
+      question_text: string;
+      options: string[]; // stored/serialized by DB layer
+      correct_answer: number; // 0..3
+      difficulty: number; // 1..5
+      tags?: string[]; // optional
+      explanation?: string[] | null; // <-- match DB: array or null
+    };
+
+    const notNull = <T>(x: T | null | undefined): x is T => x != null;
+    const norm = (s: unknown) =>
+      String(s ?? "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const rows: (InsertQuestionRow | null)[] = (payload?.questions ?? []).map(
+      (q: any) => {
+        // options as string[]
+        const opts: string[] = Array.isArray(q?.options)
+          ? (q.options as unknown[]).slice(0, 4).map((s: any) => String(s))
+          : [];
+
+        // must be exactly 4 options
+        if (opts.length !== 4) {
+          console.warn("✗ Skipping (needs 4 options):", q?.question_text);
+          return null;
+        }
+
+        // resolve correct index (prefer normalized numeric; then 0-based/1-based; then text match)
+        let idx: number =
+          typeof q?.correct_answer === "number" ? q.correct_answer : -1;
+
+        if (idx < 0 || idx >= opts.length) {
+          const ai = Number(q?.answerIndex);
+          if (!Number.isNaN(ai) && ai >= 0 && ai < opts.length) idx = ai;
+          else if (!Number.isNaN(ai) && ai >= 1 && ai <= opts.length)
+            idx = ai - 1;
+        }
+
+        if (idx < 0 || idx >= opts.length) {
+          const ansText = norm(q?.correct_answer ?? q?.answer ?? q?.answerText);
+          if (ansText) {
+            idx = opts.findIndex((o: string) => norm(o) === ansText);
+          }
+        }
+
+        if (idx < 0 || idx >= opts.length) {
+          console.warn("✗ Could not resolve correct_answer:", q?.question_text);
+          return null;
+        }
+
+        // explanation must be string[] | null for insertMany
+        const explanation: string[] | null = Array.isArray(q?.explanation)
+          ? (q.explanation as unknown[]).map((s: any) => String(s))
+          : typeof q?.explanation === "string" && q.explanation.trim() !== ""
           ? [q.explanation]
-          : undefined,
-      };
-    });
-    await insertMany(rows);
+          : null;
 
-    return res.json({ inserted: payload.questions.length, topic, difficulty });
+        // tags -> string[]
+        const tags: string[] = Array.isArray(q?.tags)
+          ? (q.tags as unknown[]).map((t: any) => String(t))
+          : typeof q?.tags === "string"
+          ? (() => {
+              try {
+                const parsed = JSON.parse(q.tags);
+                return Array.isArray(parsed) ? parsed.map(String) : [];
+              } catch {
+                return [];
+              }
+            })()
+          : [];
+
+        return {
+          topic: String(payload?.topic ?? topic),
+          question_text: String(q?.question_text ?? q?.question ?? "").trim(),
+          options: opts,
+          correct_answer: idx,
+          difficulty: Number(payload?.difficulty ?? difficulty) || 3,
+          tags,
+          explanation, // <-- rename to `explanation` here if your DB expects that
+        };
+      }
+    );
+
+    const cleanRows: InsertQuestionRow[] = rows.filter(notNull);
+
+    if (cleanRows.length === 0) {
+      return res.status(422).json({ error: "No valid questions to insert." });
+    }
+
+    await insertMany(cleanRows);
+
+    return res.json({
+      inserted: cleanRows.length,
+      topic: payload?.topic ?? topic,
+      difficulty: payload?.difficulty ?? difficulty,
+      generation_time: payload?.generation_time,
+    });
   } catch (err: any) {
     if (res.headersSent) return;
     const status = Number(err?.status) || 400;

@@ -1,4 +1,3 @@
-// src/db/questions.ts
 import pool from "./db";
 
 export type Question = {
@@ -8,8 +7,8 @@ export type Question = {
   question_text: string;
   options: string[];
   correct_answer: number;
-  explanation: string;
-  tags: string[] | null;
+  explanation: string | null;
+  tags: string[];
   created_at: string;
 };
 
@@ -17,10 +16,10 @@ export async function insertQuestion(q: {
   topic: string;
   question_text: string;
   options: string[];                     // 4 choices
-  correct_answer: "A" | "B" | "C" | "D"; // char(1)
+  correct_answer: number;                 // 0-3
   difficulty: number;
   tags?: string[];
-  explanation?: string[];               // only if you added this column
+  explanation?: string[] | null;               // only if you added this column
 }) {
   const sql = `
     INSERT INTO questions
