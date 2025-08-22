@@ -1,7 +1,7 @@
 import { number, z } from "zod";
 import { RequestHandler } from "express";
 import { generateQuestions } from "../services/examStructure";
-import { insertQuestion, getQuestions } from "../config/qustionsMiddleware";
+import { insertQuestion, getQuestions } from "../middleware/qustions";
 import pool from "../config/db";
 const ReqSchema = z
   .object({

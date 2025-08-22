@@ -1,5 +1,5 @@
 import pool from "../config/db";
-import { Question } from "../config/qustionsMiddleware";
+import { Question } from "../middleware/qustions";
 
 export async function insertQuestion(q: Question) {
   return pool.query(

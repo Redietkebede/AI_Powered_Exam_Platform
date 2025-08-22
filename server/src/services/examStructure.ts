@@ -3,7 +3,7 @@ import { z } from "zod";
 import { examPrompt, Difficulty } from "../prompts/prompt";
 import { logBadGen } from "../doc/logBadGen";
 import { validateQuestion } from "./validateQuestion";
-import type { Question } from "../config/qustionsMiddleware";
+import type { Question } from "../middleware/qustions";
 
 // ---- env & client ----
 const { OPENROUTER_API_KEY, LLM_BASE_URL, LLM_MODEL } = process.env;
