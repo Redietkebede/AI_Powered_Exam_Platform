@@ -2,8 +2,38 @@ import { Link } from 'react-router-dom'
 import { getAnalyticsDetails } from '../../services/analyticsService'
 import { Users, Activity, Trophy, ClipboardList, ArrowRight, Timer, Settings2, PlusCircle, CalendarDays } from 'lucide-react'
 
+import { useEffect, useState } from 'react'
+
+type AnalyticsSummary = Awaited<ReturnType<typeof getAnalyticsDetails>>
+
 export default function RecruiterDashboard() {
-  const summary = getAnalyticsDetails()
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    ;(async () => {
+      try {
+        const data = await getAnalyticsDetails("")
+        if (alive) setSummary(data)
+      } catch {
+        if (alive) setSummary(null)
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => { alive = false }
+  }, [])
+
+  if (loading || !summary) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <span className="text-gray-500">Loading dashboard...</span>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -51,14 +81,14 @@ export default function RecruiterDashboard() {
 
       {/* Quick Actions */}
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between">
-            <h3 className="font-medium text-[#0f2744]">Create Assignment</h3>
-            <Timer className="h-4 w-4 text-[#ff7a59]" />
-          </div>
-          <p className="mt-2 text-sm text-gray-600">Configure topics, difficulty, type, and schedule.</p>
-          <Link to="/app/assignments" className="mt-4 inline-flex items-center gap-2 rounded-md bg-[#ff7a59] px-4 py-2 text-white text-sm hover:brightness-110">Open Builder <ArrowRight className="h-4 w-4" /></Link>
-        </div>
+          {summary.recentActivity.slice(0, 5).map((a: { candidate: string; date: string; score: number; correct: number; total: number }) => (
+            <li key={`${a.candidate}-${a.date}`} className="rounded border border-gray-100 bg-gray-50 px-3 py-2">
+              <span className="font-medium text-[#0f2744]">{a.candidate}</span> scored {a.score}% ({a.correct}/{a.total}) · {new Date(a.date).toLocaleString()}
+            </li>
+          ))}
+          {summary.recentActivity.length === 0 && (
+            <li className="rounded border border-dashed border-gray-200 bg-white px-3 py-6 text-center text-gray-500">No recent activity.</li>
+          )}
         <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <h3 className="font-medium text-[#0f2744]">Templates</h3>

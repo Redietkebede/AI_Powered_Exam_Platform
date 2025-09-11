@@ -1,45 +1,42 @@
 import { Router } from "express";
 import { verifyToken } from "../middleware/auth"; // your strict auth.ts
-import { authorize, atLeast } from "../middleware/authorize";
+import { authorize } from "../middleware/authorize";
 import {
   createQuestions,
   listQuestions,
   deleteQuestion,
-  publishQuestion
+  createQuestionManual,
+  deleteQuestionById
 } from "../controllers/questionControllers";
 
 const router = Router();
 
-// Only editor can generate questions
-router.post(
-  "/generate",
-  verifyToken,
-  authorize(["editor"]),
-  createQuestions
-);
 
-// Admin/editor/recruiter can list questions
 router.get(
-  "/api/questions",
+  "/questions",
   verifyToken,
   authorize(["admin", "editor", "recruiter"]),
   listQuestions
 );
 
-// Admin only can delete a question
-router.delete(
-  "/api/questions/:id",
+router.post(
+  "/questions",
   verifyToken,
-  authorize(["admin", "editor"]),
-  deleteQuestion
+  authorize(["editor", "admin"]),
+  createQuestionManual
+);
+router.post(
+  "/questions/generate",
+  verifyToken,
+  authorize(["editor"]),
+  createQuestions
 );
 
-// Example using hierarchy helper:
-router.post(
-  "/api/publish",
+router.delete(
+  "/questions/:id",
   verifyToken,
-  atLeast("editor"), // editor or admin
-  publishQuestion
+  authorize(["admin", "editor"]),
+  deleteQuestionById
 );
 
 export default router;

@@ -1,4 +1,4 @@
-import { number, z } from "zod";
+import { z } from "zod";
 import { RequestHandler } from "express";
 import { generateQuestions } from "../services/examStructure";
 import { insertQuestion, getQuestions } from "../middleware/qustions";
@@ -24,14 +24,72 @@ const ReqSchema = z
       }))
   );
 
-const PublishSchema = z.object({
-  ids: z.array(z.coerce.number().int().positive()).min(1),
-  action: z.enum(["publish", "unpublish"]).default("publish"),
-});
 const DeleteSchema = z.object({
   ids: z.array(z.coerce.number().int().positive()).min(1),
   hard: z.coerce.boolean().optional().default(false),
 });
+
+export const ManualCreateSchema = z.object({
+  question_text: z.string().min(1),
+  options: z.array(z.string().trim()).default([]), // [] for non-MCQ
+  correct_answer: z.number().int().nonnegative().default(0), // 0-based
+  difficulty: z.union([
+    z.literal(1),
+    z.literal(2),
+    z.literal(3),
+    z.literal(4),
+    z.literal(5),
+  ]),
+  topic: z.string().min(1), // <-- maps to your DB's topic column
+  tags: z.array(z.string().trim()).optional(),
+  type: z.enum(["MCQ", "Short Answer", "Essay"]).optional(), // if you store it
+});
+
+export const createQuestionManual: RequestHandler = async (req, res, next) => {
+  try {
+    // Hard block: manual route should not accept query params (prevents generator misuse)
+    if (Object.keys(req.query || {}).length > 0) {
+      return res
+        .status(400)
+        .json({ error: "Query parameters are not allowed on manual create." });
+    }
+
+    const body = ManualCreateSchema.parse(req.body);
+
+    // Defensive clamp: ensure correct_answer is in range for MCQ
+    const opts = Array.isArray(body.options) ? body.options : [];
+    const maxIdx = Math.max(0, opts.length - 1);
+    const correct = Math.min(maxIdx, Math.max(0, body.correct_answer));
+
+    // Insert exactly one row (replace with your DB layer)
+    // Replace with your DB layer, e.g. using pool.query or a service function
+    const { rows } = await pool.query(
+      `INSERT INTO questions (topic, question_text, options, correct_answer, difficulty, tags, type, status)
+       VALUES ($1, $2, $3::jsonb, $4, $5, $6::text[], $7, $8)
+       RETURNING id, topic, question_text, options, correct_answer, difficulty, tags, created_at;`,
+      [
+        body.topic,
+        body.question_text,
+        JSON.stringify(opts),
+        correct,
+        body.difficulty,
+        body.tags ?? [],
+        body.type ?? "MCQ",
+        "draft",
+      ]
+    );
+    const created = rows[0];
+
+    return res.status(201).json(created);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res
+        .status(400)
+        .json({ error: "Invalid input", details: err.issues });
+    }
+    next(err);
+  }
+};
 
 export const createQuestions: RequestHandler = async (req, res) => {
   try {
@@ -40,7 +98,7 @@ export const createQuestions: RequestHandler = async (req, res) => {
     const payload = await generateQuestions(
       topic,
       difficulty as 1 | 2 | 3 | 4 | 5,
-      count,
+      count
     );
 
     // WRITE model: match exactly what insertMany expects
@@ -205,35 +263,6 @@ export async function insertMany(
     client.release();
   }
 }
-
-export const publishQuestion: RequestHandler = async (req, res) => {
-  try {
-    const { ids, action } = PublishSchema.parse(req.body);
-    const userId = req.user!.id; // set by verifyToken
-
-    const { rows } = await pool.query(
-      `
-      UPDATE questions
-         SET status = CASE WHEN $2 = 'publish' THEN 'published' ELSE 'draft' END,
-             published_at = CASE WHEN $2 = 'publish' THEN NOW() ELSE NULL END,
-             published_by = CASE WHEN $2 = 'publish' THEN $3 ELSE NULL END
-       WHERE id = ANY($1::int[])
-         AND deleted_at IS NULL
-      RETURNING id, status, published_at, published_by;
-      `,
-      [ids, action, userId]
-    );
-
-    return res.json({
-      updated: rows.length,
-      action,
-      items: rows,
-    });
-  } catch (err: any) {
-    const details = err?.issues ?? err?.message ?? String(err);
-    return res.status(400).json({ error: "failed to publish", details });
-  }
-};
 export const deleteQuestion: RequestHandler = async (req, res) => {
   try {
     const { ids, hard } = DeleteSchema.parse(req.body);
@@ -272,16 +301,40 @@ export const deleteQuestionById: RequestHandler = async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) {
     return res.status(400).json({ error: "invalid id" });
   }
+
+  // hard delete if ?hard=1 or ?hard=true
+  const hard = /^(1|true)$/i.test(String(req.query.hard ?? "0"));
+
   try {
+    if (hard) {
+      // HARD DELETE: physically remove the row
+      const { rowCount } = await pool.query(
+        "DELETE FROM questions WHERE id = $1",
+        [id]
+      );
+      if (!rowCount) return res.status(404).json({ error: "not found" });
+      return res.status(204).send();
+    }
+
+    // SOFT DELETE: keep history, hide from lists
     const { rowCount } = await pool.query(
-      `UPDATE questions SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL;`,
+      `UPDATE questions
+         SET deleted_at = NOW(),
+             status = COALESCE(NULLIF(status,''), 'archived')
+       WHERE id = $1 AND deleted_at IS NULL`,
       [id]
     );
-    if (!rowCount) return res.status(404).json({ error: "not found" });
+    if (!rowCount)
+      return res.status(404).json({ error: "not found or already archived" });
     return res.json({ deleted: 1, id, hard: false });
   } catch (e: any) {
-    return res
-      .status(500)
-      .json({ error: "failed to delete", details: e.message });
+    // FK violation (referenced elsewhere) → advise soft delete or cascade
+    if (e?.code === "23503") {
+      return res.status(409).json({
+        error:
+          "Cannot hard-delete: other records reference this question. Use soft delete or add ON DELETE CASCADE.",
+      });
+    }
+    return res.status(500).json({ error: "failed to delete", details: e.message });
   }
 };

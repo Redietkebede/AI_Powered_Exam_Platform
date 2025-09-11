@@ -1,7 +1,8 @@
 import { Link } from 'react-router-dom'
 import { getAttempts, isAssignmentCompleted, getAssignmentCompletion, getAssignmentCompletions } from '../../services/examService'
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { getCurrentUser } from '../../services/authService'
+import { type User } from '../../services/userService';
 
 // local helper to read saved assignments created in AssignmentsPage
 function getAssignmentsLocal() {
@@ -14,10 +15,18 @@ function getAssignmentsLocal() {
 }
 
 export default function CandidateDashboard() {
-  const allAttempts = getAttempts()
   const [showGuidelinesModal, setShowGuidelinesModal] = useState<string | null>(null)
+  const [user, setUser] = useState<User | null>(null);
   
-  const user = getCurrentUser()
+  useEffect(() => {
+    const fetchUser = async () => {
+      const currentUser = await getCurrentUser();
+      setUser(currentUser);
+    };
+    fetchUser();
+  }, []);
+
+  const allAttempts = getAttempts()
   const candidateAttempts = useMemo(() => {
     return allAttempts.filter((a) => a.candidate === (user?.name ?? ''))
   }, [allAttempts, user])
@@ -109,8 +118,8 @@ export default function CandidateDashboard() {
       const totalMinutes = Math.round(duration * count)
       
       // Check if this assignment is completed
-      const isCompleted = isAssignmentCompleted(a.id, user.name)
-      const completionData = isCompleted ? getAssignmentCompletion(a.id, user.name) : null
+      const isCompleted = isAssignmentCompleted(a.id, user.name ?? '')
+      const completionData = isCompleted ? getAssignmentCompletion(a.id, user.name ?? '') : null
       const status = isCompleted ? 'completed' : 'pending'
       
       const guidelines = [

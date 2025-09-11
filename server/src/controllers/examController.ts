@@ -2,7 +2,7 @@ import { RequestHandler } from "express";
 import pool from "../config/db";
 import { adaptiveEngine } from "../services/adaptive"; // bayesian engine
 import { updateElo } from "../services/elo";
-import { ensureUser } from "../controllers/meControllers";
+import { ensureUser } from "./usersControllers";
 
 export const startExam: RequestHandler = async (req, res) => {
   const { firebaseUid } = req.user!; // now typed

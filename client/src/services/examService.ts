@@ -1,25 +1,3 @@
-/**
- * Exam Service - Manages exam attempts, submissions, and completion tracking
- * 
- * NEW FEATURES (One Attempt Per Assignment):
- * - Prevents multiple attempts for the same assignment
- * - Tracks assignment completion status per candidate
- * - Stores completion data with scores and timestamps
- * - Provides completion status checking functions
- * 
- * How it works:
- * 1. When starting an exam, check if assignment already completed
- * 2. If completed, return null (prevents new attempt)
- * 3. If not completed, create new attempt
- * 4. When exam finishes, mark assignment as completed
- * 5. Store completion data for dashboard display
- * 
- * Storage Keys:
- * - ai_exam_results: Legacy aggregated results
- * - ai_exam_attempts: Detailed attempt tracking
- * - ai_exam_assignment_completions: NEW - Assignment completion status
- */
-
 import { getQuestions, type Question } from './questionService'
 import { getCurrentUser } from './authService'
 

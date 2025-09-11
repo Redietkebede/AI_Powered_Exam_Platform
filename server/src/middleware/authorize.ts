@@ -8,7 +8,7 @@ export function authorize(allowed: Role[]): RequestHandler {
     const role = req.user?.role;
     if (!role) return res.status(401).json({ error: "Unauthorized" }); // no user on request
     if (!allowed.includes(role)) {
-      return res.status(403).json({ error: "Forbidden: insufficient role", role });
+      return res.status(403).json({ code: "FORBIDDEN", message: "Forbidden: insufficient role", role });
     }
     next();
   };
@@ -22,7 +22,7 @@ const rank: Record<Role, number> = { admin: 3, editor: 2, recruiter: 1, candidat
 export function atLeast(min: Role): RequestHandler {
   return (req, res, next) => {
     const role = req.user?.role;
-    if (!role) return res.status(401).json({ error: "Unauthorized" });
+    if (!role) return res.status(401).json({ code: "UNAUTHORIZED", message: "Unauthorized" });
     if (rank[role] < rank[min]) {
       return res.status(403).json({ error: `Forbidden: requires >= ${min}`, role });
     }

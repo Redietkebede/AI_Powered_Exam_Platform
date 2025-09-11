@@ -5,7 +5,7 @@ admin.initializeApp({
   credential: admin.credential.cert(service_account as admin.ServiceAccount),
 });
 
-const testUID = "YyFJuPTa74dAgPJxtbbasnvr1Av1"; 
+const testUID = "fQwQ34IKXbg92gC4LR0T1WkVgKn1"; 
 
 async function generateIdToken() {
   try {

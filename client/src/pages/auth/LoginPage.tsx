@@ -1,108 +1,117 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { login } from '../../services/authService'
-import { findUserByCredentials, getUsers } from '../../services/userService'
-import logo from '../../assets/logo.jpg'
+import { useState } from "react";
+import type { FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
+import { signInWithEmailAndPassword } from "firebase/auth";
+import { auth } from "../../lib/firebase";
+import { request } from "../../lib/api";
+import logo from "../../assets/logo.jpg";
 
-type Props = { onLogin?: (role: string) => void }
+export default function LoginPage() {
+  const navigate = useNavigate();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-export default function LoginPage({ onLogin }: Props) {
-  const navigate = useNavigate()
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [rolePickerOpen, setRolePickerOpen] = useState(false)
+  const onSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    try {
+      console.log("email:", email);
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      const t = await cred.user.getIdToken(true); // force fresh
+      console.log("uid:", cred.user.uid);
+      console.log("idToken prefix:", t.slice(0, 16), "… length:", t.length);
+    } catch (e) {
+      console.error("[AUTH] sign-in error", e);
+    } finally {
+      console.groupEnd();
+    }
+  };
 
   return (
-    <div className="relative min-h-screen">
-      {/* MMCY palette background */}
-      <div className="absolute inset-0 bg-gradient-to-r from-slate-800 via-slate-700 to-[#ff7a59]" />
-
-      <div className="relative z-10 flex min-h-screen items-center justify-center p-6">
-        <div className="w-full max-w-sm rounded-xl border border-white/15 bg-white/10 p-6 shadow-xl backdrop-blur">
-          <div className="flex items-center">
-            <span className="inline-flex items-center justify-center rounded-md p-1 bg-gradient-to-r from-slate-800 via-slate-700 to-[#ff7a59]">
-              <img src={logo} alt="MMCY Logo" className="h-8 w-auto" />
-            </span>
-          </div>
-          <h2 className="mt-4 text-lg font-medium text-white">Sign in</h2>
-
-          <label className="mt-4 block text-sm font-medium text-white/90">Email</label>
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="admin@example.com"
-            type="email"
-            className="mt-1 w-full rounded-md border border-white/20 bg-white/90 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-[#ff7a59]"
-          />
-
-          <label className="mt-4 block text-sm font-medium text-white/90">Password</label>
-          <input
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••"
-            type="password"
-            className="mt-1 w-full rounded-md border border-white/20 bg-white/90 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-[#ff7a59]"
-          />
-
-          {error && <p className="mt-3 text-sm text-orange-200">{error}</p>}
-
-          <div className="mt-3 text-xs text-white/80">Tip: Admin demo is admin@example.com / admin123</div>
-
-          <button
-            onClick={() => {
-              if (!email || !password) return setError('Enter email and password')
-              // Admin shortcut or any user created by Admin
-              const builtInAdmin = email.toLowerCase() === 'admin@example.com' && password === 'admin123'
-              const user = builtInAdmin ? { id: 'builtin-admin', name: 'Administrator', email, role: 'admin' as const } : findUserByCredentials(email, password)
-              if (!user) return setError('Invalid credentials')
-              setError('')
-              login({ id: (user as any).id, name: (user as any).name, email: (user as any).email, role: (user as any).role })
-              onLogin?.((user as any).role)
-              navigate('/app')
-            }}
-            className="mt-5 w-full rounded-md bg-[#ff7a59] px-4 py-2 text-sm font-medium text-white hover:brightness-110"
-          >
-            Sign in
-          </button>
-
-          <div className="mt-4 flex items-center justify-between text-xs text-white/80">
-            <span>Need a role?</span>
-            <button onClick={() => setRolePickerOpen((v) => !v)} className="underline">Switch role (dev)</button>
-          </div>
-
-          {rolePickerOpen && (
-            <div className="mt-3 rounded-md border border-white/15 bg-white/10 p-3 text-xs text-white/90">
-              <div className="mb-2 font-medium">Quick role switch</div>
-              <div className="grid grid-cols-2 gap-2">
-                {['admin','editor','recruiter','candidate'].map((r) => (
-                  <button
-                    key={r}
-                    onClick={() => {
-                      const existing = getUsers().find(u => u.role === (r as any))
-                      if (existing) {
-                        login({ id: existing.id, name: existing.name, email: existing.email, role: existing.role })
-                        onLogin?.(r)
-                        navigate('/app')
-                        return
-                      }
-                      const demoEmail = `${r}@demo.local`
-                      login({ name: r.toUpperCase(), email: demoEmail, role: r as any })
-                      onLogin?.(r)
-                      navigate('/app')
-                    }}
-                    className="rounded-md border border-white/20 px-2 py-1 hover:bg-white/10"
-                  >
-                    {r}
-                  </button>
-                ))}
-              </div>
+    // ⬇️ Background: deep navy → warm coral (matches your screenshot)
+    <div
+      className="min-h-screen w-full flex items-center justify-center p-4
+                    bg-gradient-to-r from-[#0B1E2E] via-[#2B3A49] to-[#ff7a59]"
+    >
+      {/* Glassy card with subtle border and shadow, centered */}
+      <div className="w-full max-w-md">
+        <div className="rounded-xl border border-white/15 bg-white/10 backdrop-blur-md shadow-[0_10px_30px_rgba(0,0,0,0.25)]">
+          <div className="p-6 sm:p-7">
+            {/* Header */}
+            <div className="mb-6 flex flex-col items-center">
+              <img src={logo} alt="MMCY Logo" className="h-10 w-auto mb-3" />
+              <h2 className="text-lg font-semibold text-white/95">Sign in</h2>
             </div>
-          )}
+
+            {/* Form */}
+            <form onSubmit={onSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-white/90">
+                  Email
+                </label>
+                <input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  type="email"
+                  placeholder="admin@example.com"
+                  className="mt-1 w-full rounded-md border border-white/20 bg-white
+                             px-3 py-2 text-sm text-slate-900
+                             focus:outline-none focus:ring-2 focus:ring-white/40 focus:border-white/40"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-white/90">
+                  Password
+                </label>
+                <input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  type="password"
+                  placeholder="••••••••"
+                  className="mt-1 w-full rounded-md border border-white/20 bg-white
+                             px-3 py-2 text-sm text-slate-900
+                             focus:outline-none focus:ring-2 focus:ring-white/40 focus:border-white/40"
+                  required
+                />
+              </div>
+
+              {error && <p className="text-sm text-red-200">{error}</p>}
+
+              <p className="text-xs text-white/70">
+                Tip: Admin demo is{" "}
+                <span className="font-medium">admin@example.com</span> /{" "}
+                <span className="font-mono">admin123</span>
+              </p>
+
+              {/* Primary CTA in the same coral tone */}
+              <button
+                type="submit"
+                disabled={loading}
+                className="mt-2 w-full rounded-md bg-[#ff7a59] px-4 py-2
+                           text-white text-sm font-medium shadow
+                           hover:brightness-110 active:brightness-95
+                           disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {loading ? "Signing in…" : "Sign in"}
+              </button>
+
+              {/* Footer row */}
+              <div className="mt-2 flex items-center justify-between text-[11px] text-white/70">
+                <span>Need a role?</span>
+                <a href="#" className="underline-offset-2 hover:underline">
+                  Switch role (dev)
+                </a>
+              </div>
+            </form>
+          </div>
         </div>
       </div>
     </div>
-  )
+  );
 }
-
-

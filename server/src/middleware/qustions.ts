@@ -15,11 +15,11 @@ export type Question = {
 export async function insertQuestion(q: {
   topic: string;
   question_text: string;
-  options: string[];                     // 4 choices
-  correct_answer: number;                 // 0-3
+  options: string[]; // 4 choices
+  correct_answer: number; // 0-3
   difficulty: number;
   tags?: string[];
-  explanation?: string[] | null;               // only if you added this column
+  explanation?: string[] | null; // only if you added this column
 }) {
   const sql = `
     INSERT INTO questions
@@ -30,17 +30,16 @@ export async function insertQuestion(q: {
     RETURNING *;
   `;
   const vals = [
-    q.topic,                 // $1
-    q.question_text,         // $2
-    q.options,               // $3 -> jsonb (no stringify)
-    q.correct_answer,        // $4 -> 'A'|'B'|'C'|'D'
-    q.difficulty,            // $5
+    q.topic, // $1
+    q.question_text, // $2
+    q.options, // $3 -> jsonb (no stringify)
+    q.correct_answer, // $4 -> 'A'|'B'|'C'|'D'
+    q.difficulty, // $5
     Array.isArray(q.tags) ? q.tags : [], // $6 -> text[]
   ];
   const { rows } = await pool.query(sql, vals);
   return rows[0] as Question | undefined;
 }
-
 
 export async function getQuestions(
   topic: string,

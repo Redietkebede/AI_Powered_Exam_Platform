@@ -1,4 +1,3 @@
-// server/src/services/validateQuestions/validateQuestion.ts
 import { MCQ } from "../services/examStructure";
 
 function norm(s: string) {
@@ -49,5 +48,18 @@ export function validateQuestion(q: any): MCQ | null {
     explanation: q.explanation ? String(q.explanation) : null,
     tags: Array.isArray(q.tags) ? q.tags.map(String) : [],
     difficulty: Number(q.difficulty) || 3,
+  };
+}
+
+// from validateQuestion.ts output -> create payload
+export function toCreateFromValidated(m: {
+  question_text: string; options: string[]; correct_answer: number; difficulty: number; tags?: string[];
+}) {
+  return {
+    stem: m.question_text,
+    options: m.options,
+    correctIndex: m.correct_answer,
+    difficulty: m.difficulty,
+    tags: m.tags ?? [],
   };
 }
