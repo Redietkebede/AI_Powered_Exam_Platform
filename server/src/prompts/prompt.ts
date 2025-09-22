@@ -1,6 +1,10 @@
 export type Difficulty = 1 | 2 | 3 | 4 | 5;
 
-export function examPrompt(topic: string, difficulty: Difficulty, count: number = 5) {
+export function examPrompt(
+  topic: string,
+  difficulty: Difficulty,
+  count: number = 5
+) {
   return `
 You are an expert exam item writer.
 
@@ -31,4 +35,3 @@ Generate ${count} multiple-choice questions about "${topic}" at difficulty ${dif
 }
 `;
 }
-

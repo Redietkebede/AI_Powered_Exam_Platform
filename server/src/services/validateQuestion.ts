@@ -56,7 +56,7 @@ export function toCreateFromValidated(m: {
   question_text: string; options: string[]; correct_answer: number; difficulty: number; tags?: string[];
 }) {
   return {
-    stem: m.question_text,
+    question_text: m.question_text,
     options: m.options,
     correctIndex: m.correct_answer,
     difficulty: m.difficulty,

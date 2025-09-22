@@ -50,7 +50,7 @@ export function mapDbRowToQuestion(row: DbQuestionRow): Question {
   const q: Question = {
     id: row.id,
     text: row.question_text,
-    stem: row.question_text,      // legacy alias
+    question_text: row.question_text,      // legacy alias
     options,
     choices: options,             // alias
     correctIndex: idx,
@@ -61,7 +61,6 @@ export function mapDbRowToQuestion(row: DbQuestionRow): Question {
     status,
     tags: row.tags ?? [],
     topic: row.topic ?? undefined,
-    subject: row.topic ?? undefined, // legacy alias
     createdAt: row.created_at ?? undefined,
   };
 

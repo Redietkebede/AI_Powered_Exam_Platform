@@ -1,205 +1,320 @@
-import { getQuestions, type Question } from './questionService'
-import { getCurrentUser } from './authService'
+import { request } from "../lib/api";
+import type { Question } from "../types/question";
 
-type Result = { candidate: string; date: string; correct: number; total: number; score: number }
+/* ================== Types ================== */
 
 export type AttemptItem = {
-  questionId: string
-  subject: string
-  difficulty: Question['difficulty']
-  type: Question['type']
-  correct: boolean
-  timeSpentMs: number
-  answeredAt: string
+  questionId: string | number;
+  topic?: string | null;
+  difficulty?: Question["difficulty"] | number;
+  type?: Question["type"] | string;
+  correct: boolean;
+  timeSpentMs: number;
+  answeredAt: string; // ISO
+};
+
+export type AttemptRecord = {
+  // Keep string here because various backends return text ids; the UI treats it as a label.
+  attemptId: string;
+  candidate: string;
+  assignmentId?: string;
+  startedAt: string; // ISO
+  completedAt?: string | null; // ISO
+  items: AttemptItem[];
+};
+
+export type AssignmentCompletion = {
+  assignmentId: string;
+  candidate: string;
+  completedAt: string; // ISO
+  total: number;
+  correct_answer: number;
+  score: number; // 0..100
+};
+
+/** Result shape used by analytics (back-compat) */
+export type Result = {
+  candidate: string;
+  date: string; // ISO date string
+  correct: number;
+  total: number;
+  score: number; // 0..100
+};
+
+/* ================== internal utils ================== */
+
+// Accept several possible keys and coerce to a positive integer id
+function coerceNumericId(payload: any): number {
+  const raw =
+    payload?.attemptId ??
+    payload?.sessionId ??
+    payload?.id ??
+    payload?.data?.attemptId ??
+    payload?.data?.sessionId ??
+    payload?.data?.id;
+
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    // eslint-disable-next-line no-console
+    console.warn("[examService] Could not coerce a numeric id from:", payload);
+    throw new Error("Server did not return a valid attempt/session id.");
+  }
+  return n;
 }
 
-export type ExamAttempt = {
-  attemptId: string
-  candidate: string
-  startedAt: string
-  completedAt: string | null
-  items: AttemptItem[]
-  assignmentId?: string
+function sanitizeTopics(input?: string[] | string): string[] | undefined {
+  if (!input) return undefined;
+  const arr = Array.isArray(input)
+    ? input
+    : String(input)
+        .split(",")
+        .map((t) => t.trim());
+
+  const bad = new Set(["", "-", "—", "general"]);
+  const clean = arr.filter((t) => t && !bad.has(t.toLowerCase()));
+  return clean.length ? clean : undefined;
 }
 
-const RESULT_KEY = 'ai_exam_results'
-const ATTEMPT_KEY = 'ai_exam_attempts'
-const ASSIGNMENT_COMPLETION_KEY = 'ai_exam_assignment_completions'
+/* ================== Server-backed helpers (aligned to your routes) ================== */
 
-function getQuestionPool(): Question[] {
-  // only approved questions should be used for delivery
-  return getQuestions().filter((q) => q.status === 'approved')
-}
+export async function getAttempts(): Promise<AttemptRecord[]> {
+  try {
+    const rows = await request<any[]>("/attempts/mine");
+    // Normalize a variety of shapes into AttemptRecord
+    return (Array.isArray(rows) ? rows : []).map((r) => {
+      const attemptId =
+        (r as any).attemptId ?? (r as any).sessionId ?? (r as any).id ?? "";
+      const candidate =
+        (r as any).candidate ?? (r as any).userName ?? (r as any).userId ?? "";
+      const startedAt =
+        (r as any).startedAt ??
+        (r as any).started_at ??
+        new Date().toISOString();
+      const completedAt =
+        (r as any).completedAt ?? (r as any).finished_at ?? null;
+      const assignmentId =
+        (r as any).assignmentId ?? (r as any).testId ?? undefined;
 
-export function getAdaptiveNextQuestion(poolArg?: Question[]): Question | null {
-  const pool = poolArg && poolArg.length > 0 ? poolArg : getQuestionPool()
-  if (pool.length === 0) return null
-  // naive adaptive: cycle through difficulties based on random
-  const difficultyOrder: Question['difficulty'][] = ['Easy', 'Medium', 'Hard']
-  const pick = difficultyOrder[Math.floor(Math.random() * difficultyOrder.length)]
-  const filtered = pool.filter((q) => q.difficulty === pick)
-  return (filtered[Math.floor(Math.random() * filtered.length)] ?? pool[0])
-}
-
-export function submitAnswer(q: Question, ans: { choice?: string; text?: string }): boolean {
-  // determine correctness based on actual data
-  let correct = false
-  if (q.type === 'MCQ' && Array.isArray(q.choices) && ans.choice !== undefined) {
-    const idx = Number(ans.choice)
-    const selected = isFinite(idx) ? q.choices[idx] : undefined
-    if (selected !== undefined) {
-      correct = String(selected).trim().toLowerCase() === String(q.answer).trim().toLowerCase()
+      return {
+        attemptId: String(attemptId),
+        candidate: String(candidate),
+        assignmentId: assignmentId != null ? String(assignmentId) : undefined,
+        startedAt: String(startedAt),
+        completedAt: completedAt as string | null,
+        items: Array.isArray((r as any).items) ? (r as any).items : [],
+      } as AttemptRecord;
+    });
+  } catch {
+    // Best-effort fallback to sessions if present; adapt shape
+    try {
+      const sessions = await request<any[]>("/sessions/mine");
+      return (Array.isArray(sessions) ? sessions : []).map(
+        (s): AttemptRecord => ({
+          attemptId: String(s.attemptId ?? s.sessionId ?? s.id ?? ""),
+          candidate: String(s.candidate ?? s.userId ?? ""),
+          assignmentId:
+            s.testId != null || s.assignmentId != null
+              ? String(s.testId ?? s.assignmentId)
+              : undefined,
+          startedAt: String(
+            s.startedAt ?? s.started_at ?? new Date().toISOString()
+          ),
+          completedAt: (s.completedAt ?? s.finished_at ?? null) as
+            | string
+            | null,
+          items: [],
+        })
+      );
+    } catch {
+      return [];
     }
-  } else if (ans.text !== undefined) {
-    correct = String(ans.text).trim().toLowerCase() === String(q.answer).trim().toLowerCase()
   }
-  const user = getCurrentUser()
-  const results = getResults()
-  const existing = results.find((r) => r.candidate === (user?.name ?? 'Anonymous'))
-  if (!existing) {
-    const newEntry: Result = { candidate: user?.name ?? 'Anonymous', date: new Date().toISOString(), correct: Number(correct), total: 1, score: 0 }
-    newEntry.score = Math.round((newEntry.correct / newEntry.total) * 100)
-    results.push(newEntry)
-  } else {
-    existing.total += 1
-    existing.correct += Number(correct)
-    existing.score = Math.round((existing.correct / existing.total) * 100)
-    existing.date = new Date().toISOString()
-  }
-  localStorage.setItem(RESULT_KEY, JSON.stringify(results))
-  return correct
 }
 
-export function getResults(): Result[] {
-  const raw = localStorage.getItem(RESULT_KEY)
-  return raw ? (JSON.parse(raw) as Result[]) : []
+export async function getAssignmentCompletions(): Promise<
+  AssignmentCompletion[]
+> {
+  const list = await request<AssignmentCompletion[]>("/completions/mine");
+  return Array.isArray(list) ? list : [];
 }
 
-// Attempts API for detailed analytics
-export function startAttempt(params?: { assignmentId?: string }): string | null {
-  const user = getCurrentUser()
-  const candidate = user?.name ?? 'Anonymous'
-  
-  // If this is an assignment, check if already completed
-  if (params?.assignmentId) {
-    if (isAssignmentCompleted(params.assignmentId, candidate)) {
-      return null // Already completed, prevent new attempt
+export async function isAssignmentCompleted(
+  assignmentId: string,
+  _candidate?: string
+): Promise<boolean> {
+  if (!assignmentId) return false;
+  try {
+    const one = await request<AssignmentCompletion | null>(
+      "/completions/mine",
+      {
+        method: "GET",
+        params: { assignmentId },
+      } as any
+    );
+    return !!one;
+  } catch {
+    const list = await getAssignmentCompletions();
+    return list.some((c) => String(c.assignmentId) === String(assignmentId));
+  }
+}
+
+export async function getAssignmentCompletion(
+  assignmentId: string,
+  _candidate?: string
+): Promise<AssignmentCompletion | null> {
+  if (!assignmentId) return null;
+  try {
+    return await request<AssignmentCompletion | null>("/completions/mine", {
+      method: "GET",
+      params: { assignmentId },
+    } as any);
+  } catch {
+    const list = await getAssignmentCompletions();
+    return (
+      list.find((c) => String(c.assignmentId) === String(assignmentId)) ?? null
+    );
+  }
+}
+
+/**
+ * Start attempt — server enforces one-attempt policy and returns a numeric id.
+ * NOTE: We default to NOT sending topics unless caller provides non-placeholder topics,
+ * to avoid over-filtering to 0 questions.
+ */
+export async function startAttempt(ctx?: {
+  assignmentId?: string | number; // accepted but converted to testId when numeric
+  testId?: number; // preferred
+  topics?: string[] | string;
+  limit?: number;
+  durationSeconds?: number;
+}): Promise<number> {
+  const body: Record<string, unknown> = {};
+
+  // Prefer explicit testId; else coerce assignmentId -> number
+  if (typeof ctx?.testId === "number" && Number.isFinite(ctx.testId)) {
+    body.testId = ctx!.testId;
+  } else if (
+    ctx?.assignmentId !== undefined &&
+    ctx?.assignmentId !== null &&
+    String(ctx.assignmentId).trim() !== "" &&
+    Number.isFinite(Number(ctx.assignmentId))
+  ) {
+    body.testId = Number(ctx.assignmentId);
+  }
+
+  // Only attach topics if non-empty and not placeholders
+  const topics = sanitizeTopics(ctx?.topics);
+  if (topics && topics.length) body.topics = topics;
+
+  // limit: clamp 1..100 (server default 10)
+  if (typeof ctx?.limit === "number" && Number.isFinite(ctx.limit)) {
+    body.limit = Math.max(1, Math.min(100, Math.floor(ctx.limit)));
+  }
+
+  // durationSeconds: optional, positive integer
+  if (
+    typeof ctx?.durationSeconds === "number" &&
+    Number.isFinite(ctx.durationSeconds) &&
+    ctx.durationSeconds > 0
+  ) {
+    body.durationSeconds = Math.floor(ctx.durationSeconds);
+  }
+
+  // POST /start (request() adds Authorization header and base /api)
+  try {
+    const res = await request<any>("/start", { method: "POST", body } as any);
+    return coerceNumericId(res);
+  } catch (err: any) {
+    const msg = String(
+      err?.message ||
+        err?.payload?.error ||
+        err?.payload?.message ||
+        "Failed to start exam"
+    );
+
+    if (/no published questions|no approved mcq|no questions/i.test(msg)) {
+      throw new Error(
+        "No published questions available for the requested criteria."
+      );
     }
-  }
-  
-  const attempts = getAttempts()
-  const attempt: ExamAttempt = {
-    attemptId: crypto.randomUUID(),
-    candidate,
-    startedAt: new Date().toISOString(),
-    completedAt: null,
-    items: [],
-    assignmentId: params?.assignmentId,
-  }
-  attempts.push(attempt)
-  localStorage.setItem(ATTEMPT_KEY, JSON.stringify(attempts))
-  return attempt.attemptId
-}
-
-export function endAttempt(attemptId: string) {
-  const attempts = getAttempts()
-  const attempt = attempts.find(a => a.attemptId === attemptId)
-  
-  if (attempt) {
-    // Mark attempt as completed
-    const updatedAttempts = attempts.map((a) => 
-      (a.attemptId === attemptId ? { ...a, completedAt: new Date().toISOString() } : a)
-    )
-    localStorage.setItem(ATTEMPT_KEY, JSON.stringify(updatedAttempts))
-    
-    // If this was an assignment, mark it as completed
-    if (attempt.assignmentId) {
-      const score = attempt.items.length > 0 
-        ? Math.round((attempt.items.filter(item => item.correct).length / attempt.items.length) * 100)
-        : 0
-      markAssignmentCompleted(attempt.assignmentId, attempt.candidate, attemptId, score)
+    if (/missing.*test|invalid.*test/i.test(msg)) {
+      throw new Error("Missing or invalid test/assignment id.");
     }
-  }
-}
-
-export function submitAnswerWithMetrics(params: { question: Question; answer: { choice?: string; text?: string }; timeSpentMs: number; attemptId: string }): boolean {
-  const { question, timeSpentMs, attemptId } = params
-  // determine correctness using same logic as submitAnswer
-  let isCorrect = false
-  if (question.type === 'MCQ' && Array.isArray(question.choices) && params.answer.choice !== undefined) {
-    const idx = Number(params.answer.choice)
-    const selected = isFinite(idx) ? question.choices[idx] : undefined
-    if (selected !== undefined) {
-      isCorrect = String(selected).trim().toLowerCase() === String(question.answer).trim().toLowerCase()
+    if (/unauth|token|expired|forbidden|authorization/i.test(msg)) {
+      throw new Error("Authentication required — please sign in again.");
     }
-  } else if (params.answer.text !== undefined) {
-    isCorrect = String(params.answer.text).trim().toLowerCase() === String(question.answer).trim().toLowerCase()
+    throw new Error(msg);
   }
-
-  // keep legacy rollup for backwards compatibility
-  submitAnswer(question, params.answer)
-
-  // append to attempt items
-  const attempts = getAttempts().map((a) => {
-    if (a.attemptId !== attemptId) return a
-    const nextItem: AttemptItem = {
-      questionId: question.id,
-      subject: question.subject,
-      difficulty: question.difficulty,
-      type: question.type,
-      correct: isCorrect,
-      timeSpentMs: Math.max(0, Math.floor(timeSpentMs)),
-      answeredAt: new Date().toISOString(),
-    }
-    return { ...a, items: [...a.items, nextItem] }
-  })
-  localStorage.setItem(ATTEMPT_KEY, JSON.stringify(attempts))
-  return isCorrect
 }
 
-export function getAttempts(): ExamAttempt[] {
-  const raw = localStorage.getItem(ATTEMPT_KEY)
-  return raw ? (JSON.parse(raw) as ExamAttempt[]) : []
+/** End/submit attempt — calls your POST /submit route with { attemptId } */
+export async function endAttempt(attemptId: number | string): Promise<void> {
+  if (attemptId == null || String(attemptId).trim() === "") return;
+  const idNum = Number(attemptId);
+  await request<{ ok?: boolean; success?: boolean }>("/submit", {
+    method: "POST",
+    body: { attemptId: Number.isFinite(idNum) ? idNum : String(attemptId) },
+  } as any);
 }
 
-// New: Check if assignment is already completed by user
-export function isAssignmentCompleted(assignmentId: string, candidate: string): boolean {
-  const completions = getAssignmentCompletions()
-  return completions.some(c => c.assignmentId === assignmentId && c.candidate === candidate)
-}
-
-// New: Get assignment completion status
-export function getAssignmentCompletion(assignmentId: string, candidate: string) {
-  const completions = getAssignmentCompletions()
-  return completions.find(c => c.assignmentId === assignmentId && c.candidate === candidate)
-}
-
-// New: Mark assignment as completed
-export function markAssignmentCompleted(assignmentId: string, candidate: string, attemptId: string, score: number) {
-  const completions = getAssignmentCompletions()
-  const completion = {
-    assignmentId,
-    candidate,
-    attemptId,
-    completedAt: new Date().toISOString(),
-    score,
-    status: 'completed' as const
+/** Record per-question data — calls your POST /answer route */
+export async function recordAttemptItemRemote(
+  attemptId: number | string,
+  item: AttemptItem
+): Promise<void> {
+  try {
+    const idNum = Number(attemptId);
+    const payload = {
+      attemptId: Number.isFinite(idNum) ? idNum : String(attemptId),
+      questionId: item.questionId,
+      correct: item.correct,
+      timeSpentMs: item.timeSpentMs,
+      answeredAt: item.answeredAt,
+      // optional meta
+      topic: item.topic ?? undefined,
+      difficulty: item.difficulty ?? undefined,
+      type: item.type ?? undefined,
+    };
+    await request<{ ok?: boolean; success?: boolean }>("/answer", {
+      method: "POST",
+      body: payload,
+    } as any);
+  } catch {
+    // Endpoint optional; ignore if not implemented
   }
-  completions.push(completion)
-  localStorage.setItem(ASSIGNMENT_COMPLETION_KEY, JSON.stringify(completions))
 }
 
-// New: Get all assignment completions
-export function getAssignmentCompletions() {
-  const raw = localStorage.getItem(ASSIGNMENT_COMPLETION_KEY)
-  return raw ? (JSON.parse(raw) as Array<{
-    assignmentId: string
-    candidate: string
-    attemptId: string
-    completedAt: string
-    score: number
-    status: 'completed'
-  }>) : []
+/* ================== Analytics back-compat ================== */
+
+export async function getResults(): Promise<Result[]> {
+  const comps = await getAssignmentCompletions();
+  return comps.map((c) => ({
+    candidate: c.candidate,
+    date: c.completedAt,
+    correct: c.correct_answer,
+    total: c.total,
+    score: c.score,
+  }));
 }
 
+/* ================== Minimal adaptive (in-page only) ================== */
 
+let _order: number[] = [];
+let _cursor = 0;
+
+function buildOrder(n: number): number[] {
+  return Array.from({ length: n }, (_, i) => i);
+}
+
+/** Deterministic sequential order (unchanged) */
+export function getAdaptiveNextQuestion(pool: Question[]): Question | null {
+  if (!Array.isArray(pool) || pool.length === 0) return null as any;
+  if (_order.length !== pool.length) {
+    _order = buildOrder(pool.length);
+    _cursor = 0;
+  }
+  if (_cursor >= _order.length) return null as any;
+  const q = pool[_order[_cursor]];
+  _cursor += 1;
+  return q;
+}

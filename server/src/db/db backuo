@@ -1,0 +1,95 @@
+Yep — if you made a **pgAdmin Backup in _Custom_ format** (`.backup`, `.dump`), that file is perfect for restoring on another machine. Here’s exactly how to restore it.
+
+---
+
+# Restore on another machine
+
+## Option A — Using pgAdmin (GUI)
+
+1. **Copy the backup file** to the new machine (e.g., `exam_platform.backup`).
+2. **Create an empty database**:
+
+   - In pgAdmin: _Servers → your server → Databases → right-click → Create → Database…_
+   - Name: `exam_platform_clone` (or whatever)
+   - Owner: pick an existing role (e.g., `app_user`)
+
+3. **Restore**:
+
+   - Right-click the new DB → **Restore…**
+   - **Format**: `Custom or tar`
+   - **Filename**: select `exam_platform.backup`
+   - **Options** tab:
+
+     - **Clean before restore**: Off (it’s a new DB)
+     - **No owner**: On if the original owner role doesn’t exist on this server
+     - **Role name**: choose the role that should own the objects (often the DB owner)
+     - Leave “Only data / Only schema” Off to restore everything
+
+   - Click **Restore**.
+
+> If restore complains about missing extensions, first create them in the target DB, e.g.:
+>
+> ```sql
+> CREATE EXTENSION IF NOT EXISTS pgcrypto;
+> ```
+
+---
+
+## Option B — Command line (recommended for big DBs)
+
+> Install the same/compatible PostgreSQL client tools on the target machine.
+
+1. **Copy the file** to the target (e.g., `/tmp/exam_platform.backup`).
+
+2. **Create the target DB** and (optionally) the role:
+
+```bash
+# (optional) create a role to own objects
+psql -U postgres -h <host> -c "CREATE ROLE app_user LOGIN PASSWORD 'strongpw';"
+
+# create empty database owned by that role
+createdb -U postgres -h <host> -O app_user exam_platform_clone
+```
+
+3. **Restore**:
+
+```bash
+# basic
+pg_restore -U postgres -h <host> -d exam_platform_clone /tmp/exam_platform.backup
+
+# faster on large DBs (parallelize by 4 workers)
+pg_restore -U postgres -h <host> -j 4 -d exam_platform_clone /tmp/exam_platform.backup
+
+# if owners/privileges from the source server don't exist on target:
+pg_restore -U postgres -h <host> --no-owner --role=app_user -d exam_platform_clone /tmp/exam_platform.backup
+```
+
+---
+
+## Quick sanity checks after restore
+
+```sql
+-- connect to the new DB
+\c exam_platform_clone
+
+-- list tables
+\dt
+
+-- check a few rows
+SELECT * FROM public.your_table LIMIT 5;
+```
+
+---
+
+## Common pitfalls & fixes
+
+- **permission denied to create database** → create the DB as `postgres` or a role with `CREATEDB`, then restore with `pg_restore`.
+- **must be owner of relation** during restore → use `--no-owner --role=<target_owner>` so objects are created under an existing role.
+- **missing extension “xyz”** → `CREATE EXTENSION xyz;` on the target before restoring.
+- **encoding/collation differences** → create the target DB with the same locale/encoding if your app depends on it:
+
+  ```bash
+  createdb -U postgres -E UTF8 --lc-collate=C --lc-ctype=C -O app_user exam_platform_clone
+  ```
+
+If you tell me the target environment (Windows/Linux/Docker/cloud) and your DB/role names, I’ll tailor the exact one-liners.

@@ -1,4 +1,3 @@
-// client/src/lib/api.ts
 import { getIdToken, clearToken, setToken } from "../services/authService";
 import { getAuth } from "firebase/auth";
 
@@ -14,12 +13,32 @@ export interface RequestOpts {
   params?: Record<string, unknown>;
 }
 
-const BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
+/** ───────────────── Base URL resolution (supports both env names) ───────────────── */
+const RAW_BASE =
+  (import.meta as any).env?.VITE_API_BASE ??
+  (import.meta as any).env?.VITE_API_BASE_URL ??
+  "";
+
+let _warnedBase = false;
+function getBase(): string {
+  const base = String(RAW_BASE || "").replace(/\/+$/, "");
+  if (base) return base;
+  if (!_warnedBase) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[api] VITE_API_BASE (or VITE_API_BASE_URL) is not set. " +
+        "Falling back to relative '/api'. " +
+        "For local dev, set VITE_API_BASE=http://localhost:2800/api"
+    );
+    _warnedBase = true;
+  }
+  return "/api";
+}
 
 function buildUrl(path: string, params?: Record<string, unknown>) {
-  if (/^https?:\/\//i.test(path)) return path;
+  if (/^https?:\/\//i.test(path)) return path; // absolute already
   const p = path.startsWith("/") ? path : `/${path}`;
-  const baseUrl = `${BASE}${p}`;
+  const baseUrl = `${getBase()}${p}`;
   if (!params) return baseUrl;
 
   const usp = new URLSearchParams();
@@ -64,7 +83,8 @@ export async function request<T = unknown>(
       typeof FormData !== "undefined" && opts.body instanceof FormData;
 
     // Never send a body for GET/HEAD
-    const hasBody = opts.body !== undefined && method !== "GET" && method !== "HEAD";
+    const hasBody =
+      opts.body !== undefined && method !== "GET" && method !== "HEAD";
     let body: BodyInit | undefined;
 
     if (hasBody) {
@@ -161,26 +181,15 @@ export async function request<T = unknown>(
   return doFetch(false);
 }
 
-
-
 export const api = {
-  get: <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
+  get:   <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
     request<T>(p, { ...(opts || {}), method: "GET" }),
-  post: <T>(
-    p: string,
-    body?: unknown,
-    opts?: Omit<RequestOpts, "method" | "body">
-  ) => request<T>(p, { ...(opts || {}), method: "POST", body }),
-  put: <T>(
-    p: string,
-    body?: unknown,
-    opts?: Omit<RequestOpts, "method" | "body">
-  ) => request<T>(p, { ...(opts || {}), method: "PUT", body }),
-  patch: <T>(
-    p: string,
-    body?: unknown,
-    opts?: Omit<RequestOpts, "method" | "body">
-  ) => request<T>(p, { ...(opts || {}), method: "PATCH", body }),
-  del: <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
+  post:  <T>(p: string, body?: unknown, opts?: Omit<RequestOpts, "method" | "body">) =>
+    request<T>(p, { ...(opts || {}), method: "POST",  body }),
+  put:   <T>(p: string, body?: unknown, opts?: Omit<RequestOpts, "method" | "body">) =>
+    request<T>(p, { ...(opts || {}), method: "PUT",   body }),
+  patch: <T>(p: string, body?: unknown, opts?: Omit<RequestOpts, "method" | "body">) =>
+    request<T>(p, { ...(opts || {}), method: "PATCH", body }),
+  del:   <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
     request<T>(p, { ...(opts || {}), method: "DELETE" }),
 };

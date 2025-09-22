@@ -27,7 +27,7 @@ const UI_TO_DB: Record<UiStatusT, DbStatus> = {
   archived: "archived",
 };
 
-/** Common SELECT list; alias topic -> subject for FE compatibility */
+/** Common SELECT list; alias topic -> topic for FE compatibility */
 const SELECT_COLS = `
   id,
   question_text,
@@ -35,7 +35,7 @@ const SELECT_COLS = `
   correct_answer,
   difficulty,
   status,
-  topic AS subject,
+  topic AS topic,
   tags,
   elo_rating,
   created_at,

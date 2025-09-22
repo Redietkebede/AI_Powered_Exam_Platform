@@ -14,9 +14,9 @@ import {
 import {
   getAnalyticsDetails,
   getCandidates,
-  getSubjects,
+  gettopics,
   type AnalyticsFilters,
-} from "../../services/analyticsService";
+} from "../../services/analytics";
 import { ShieldAlert, Users, Trophy, Activity, Filter } from "lucide-react";
 import { getCurrentUser } from "../../services/userService";
 
@@ -53,25 +53,34 @@ export default function AnalyticsPage() {
 
   /** ─────────────────── Filters & static lists ─────────────────── */
   const [filters, setFilters] = useState<AnalyticsFilters>({});
-  const candidates = useMemo(() => getCandidates(), []);
-  const [subjects, setSubjects] = useState<string[]>([]);
+
+  // ⚠️ FIX: ensure we always have an array before mapping (prevents "map is not a function")
+  const candidateOptions = useMemo<string[]>(() => {
+    try {
+      const v = getCandidates();
+      return Array.isArray(v) ? (v as string[]) : [];
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const [topics, settopics] = useState<string[]>([]);
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const subj = await getSubjects(filters.subject ?? "");
-        if (alive) setSubjects(subj);
+        const subj = await gettopics(filters.topic ?? "");
+        if (alive) settopics(Array.isArray(subj) ? subj : []);
       } catch {
-        if (alive) setSubjects([]);
+        if (alive) settopics([]);
       }
     })();
     return () => {
       alive = false;
     };
-  }, [filters.subject]);
+  }, [filters.topic]);
 
   /** ─────────────────── Analytics data (safe) ─────────────────── */
-  // Shape: same as analyticsService.getAnalyticsDetails()
   type Details = Awaited<ReturnType<typeof getAnalyticsDetails>>;
   const [summary, setSummary] = useState<Details | null>(null);
   const [loading, setLoading] = useState(false);
@@ -81,7 +90,7 @@ export default function AnalyticsPage() {
     setLoading(true);
     (async () => {
       try {
-        const d = await getAnalyticsDetails(filters.subject ?? "", filters);
+        const d = await getAnalyticsDetails(filters.topic ?? "", filters);
         if (alive) setSummary(d);
       } catch {
         if (alive) setSummary(null);
@@ -94,7 +103,7 @@ export default function AnalyticsPage() {
     };
   }, [filters]);
 
-  // SAFE fallbacks prevent "Cannot read properties of undefined (reading 'map')"
+  // SAFE fallbacks
   const safeTimeline = summary?.timeline ?? [];
   const safeByDifficulty = summary?.byDifficulty ?? [];
   const safeTimeHist = summary?.timeHistogram ?? { labels: [], counts: [] };
@@ -106,7 +115,7 @@ export default function AnalyticsPage() {
     avgScore: 0,
     questions: 0,
   };
-  const subjectStats = summary?.subjectStats ?? [];
+  const topicStats = summary?.topicStats ?? [];
 
   /** ─────────────────── Charts (derived) ─────────────────── */
   const lineData = useMemo(
@@ -295,7 +304,7 @@ export default function AnalyticsPage() {
               className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
             >
               <option value="">All candidates</option>
-              {candidates.map((c) => (
+              {candidateOptions.map((c) => (
                 <option key={c} value={c}>
                   {c}
                 </option>
@@ -304,20 +313,20 @@ export default function AnalyticsPage() {
           </div>
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-2">
-              Subject
+              topic
             </label>
             <select
-              value={filters.subject ?? ""}
+              value={filters.topic ?? ""}
               onChange={(e) =>
                 setFilters((f) => ({
                   ...f,
-                  subject: e.target.value || undefined,
+                  topic: e.target.value || undefined,
                 }))
               }
               className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
             >
-              <option value="">All subjects</option>
-              {subjects.map((s) => (
+              <option value="">All topics</option>
+              {topics.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
@@ -411,7 +420,7 @@ export default function AnalyticsPage() {
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 strokeWidth={2}
-                d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+                d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2m0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2z"
               />
             </svg>
             Scores by Difficulty
@@ -436,7 +445,7 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
-      {/* Subject and time insights */}
+      {/* topic and time insights */}
       <div className="grid lg:grid-cols-2 gap-8">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <h3 className="text-lg font-bold text-gray-800 mb-6 flex items-center">
@@ -453,14 +462,14 @@ export default function AnalyticsPage() {
                 d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
               />
             </svg>
-            Subject Insights
+            topic Insights
           </h3>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-200">
                   <th className="text-left p-3 font-semibold text-gray-800">
-                    Subject
+                    topic
                   </th>
                   <th className="text-left p-3 font-semibold text-gray-800">
                     Accuracy
@@ -471,15 +480,15 @@ export default function AnalyticsPage() {
                 </tr>
               </thead>
               <tbody>
-                {(subjectStats ?? []).map((row, index) => (
+                {(topicStats ?? []).map((row: any, index: number) => (
                   <tr
-                    key={row.subject}
+                    key={row.topic}
                     className={`border-b border-gray-100 ${
                       index % 2 === 0 ? "bg-gray-50" : "bg-white"
                     }`}
                   >
                     <td className="p-3 font-medium text-gray-800">
-                      {row.subject}
+                      {row.topic}
                     </td>
                     <td className="p-3">
                       <span
@@ -497,7 +506,7 @@ export default function AnalyticsPage() {
                     <td className="p-3 text-gray-700">{row.avgTimeSec}s</td>
                   </tr>
                 ))}
-                {(subjectStats ?? []).length === 0 && (
+                {(topicStats ?? []).length === 0 && (
                   <tr>
                     <td colSpan={3} className="p-6 text-center text-gray-500">
                       No data available
@@ -550,7 +559,7 @@ export default function AnalyticsPage() {
             Top Performers
           </h3>
           <div className="space-y-4">
-            {(safeTopPerformers ?? []).map((p, index) => (
+            {(safeTopPerformers ?? []).map((p: any, index: number) => (
               <div
                 key={p.candidate}
                 className="flex items-center justify-between p-4 bg-gray-50 rounded-lg"
@@ -600,7 +609,7 @@ export default function AnalyticsPage() {
             Recent Activity
           </h3>
           <div className="space-y-4">
-            {(safeRecent ?? []).map((activity) => (
+            {(safeRecent ?? []).map((activity: any) => (
               <div
                 key={`${activity.candidate}-${activity.date}`}
                 className="flex items-center justify-between p-4 bg-gray-50 rounded-lg"

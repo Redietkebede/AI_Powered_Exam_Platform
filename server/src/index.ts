@@ -51,8 +51,7 @@ app.get("/db-test", async (req, res) => {
   }
 });
 app.use("/api/auth", authRoutes);
-app.get("/api/exams/start"); 
-app.use('/api', questionsRoutes);
+//app.get("/api/exams/start"); 
 app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (err instanceof ZodError) {
     const details = formatZodError(err);
@@ -72,7 +71,8 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 app.use("/api/publish", publishRoutes);
 app.use("/api", protectedRoutes);
 app.use("/api", assignmentRoutes);
-app.use('/api/exams', examsRoutes);
+app.use('/api', examsRoutes);
+app.use('/api', questionsRoutes);
 app.use('/api', usersRoutes);
 
 app.use(

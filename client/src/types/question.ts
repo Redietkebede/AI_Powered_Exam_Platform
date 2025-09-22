@@ -10,13 +10,12 @@ export type Question = {
   answer: string;                // convenience = options[correctIndex]
   difficulty: "Very Easy" | "Easy" | "Medium" | "Hard" | "Very Hard";
   numericDifficulty: number;     // 1..5
-  status: "pending"|"draft" | "approved" | "rejected";
+  status: "pending"|"draft" | "published" | "archived" | "rejected" | "approved";
   type: "MCQ";
   tags: string[];
   topic?: string;
   createdAt?: string;
 
   // legacy aliases still referenced in a few places
-  stem?: string;                 // = text
-  subject?: string;              // = topic
-};
+  question_text?: string;                 // = text
+ };

@@ -30,17 +30,17 @@ function toDbPayload(partial: Omit<Question, "id"> | Question & { id?: number })
 
   return {
     ...(partial as any).id ? { id: (partial as any).id } : undefined,
-    question_text: String(partial.text ?? partial.stem ?? "").trim(),
+    question_text: String(partial.text ?? partial.question_text ?? "").trim(),
     options,
     correct_answer: correct,
     difficulty: typeof (partial as any).numericDifficulty === "number"
       ? (partial as any).numericDifficulty
       : labelToNum(partial.difficulty),
     tags: Array.isArray(partial.tags) ? partial.tags : [],
-    topic: partial.topic ?? partial.subject ?? null,
+    topic: partial.topic ?? partial.topic ?? null,
     status:
-      partial.status === "approved" ? "published"
-      : partial.status === "rejected" ? "archived"
+      partial.status === "published" ? "published"
+      : partial.status === "archived" ? "archived"
       : "draft",
   };
 }
@@ -105,8 +105,8 @@ export async function updateStatus(id: number, next: Question["status"], meta?: 
   CACHE = CACHE.map((q) => (q.id === id ? { ...q, status: next } : q));
 
   const dbStatus =
-    next === "approved" ? "published"
-    : next === "rejected" ? "archived"
+    next === "published" ? "approved" 
+    : next ===  "archived" ? "rejected"
     : "draft";
 
   try {

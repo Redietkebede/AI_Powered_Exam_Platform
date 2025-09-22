@@ -17,6 +17,7 @@ import AnalyticsPage from "./pages/analytics/AnalyticsPage";
 import UsersPage from "./pages/admin/UsersPage";
 import AssignmentsPage from "./pages/assignments/AssignmentsPage";
 import NotFoundPage from "./pages/NotFoundPage";
+import SessionDetailPage from "./pages/sessions/SessionDetailPage.tsx";
 
 import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
@@ -142,6 +143,10 @@ function App() {
                 <AssignmentsPage />
               </RequireRole>
             }
+          />
+          <Route
+            path="/app/sessions/:sessionId"
+            element={<SessionDetailPage />}
           />
           <Route path="results" element={<ResultsPage />} />
           <Route path="exam" element={<ExamPage />} />

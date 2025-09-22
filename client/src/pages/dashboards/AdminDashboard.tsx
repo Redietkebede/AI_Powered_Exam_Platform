@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getAnalyticsSummary } from '../../services/analyticsService'
+import { getAnalyticsSummary } from '../../services/analytics'
 
 function readDefaultTopic(): string {
   try {

@@ -3,7 +3,7 @@
 | DB Column        | Client Field  | Transform / Notes                                  |
 |------------------|---------------|----------------------------------------------------|
 | `id` (int)       | `id` (string) | `String(id)`                                       |
-| `topic`          | `subject`     | direct                                             |
+| `topic`          | `topic`     | direct                                             |
 | `question_text`  | `text`        | direct                                             |
 | `options` (json) | `choices[]`   | array of strings; if objects, use `.text`         |
 | `correct_answer` | `answer`      | `choices[correct_answer]`                          |

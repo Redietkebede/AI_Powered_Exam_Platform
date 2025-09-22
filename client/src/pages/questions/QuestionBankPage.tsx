@@ -9,19 +9,18 @@ type Role = 'admin' | 'editor' | 'recruiter' | 'candidate'
 
 export default function QuestionBankPage() {
   const [search, setSearch] = useState('')
-  const [subject, setSubject] = useState('')
+  const [topic, setTopic] = useState('')
   const [difficulty, setDifficulty] = useState<'Very Easy' | 'Easy' | 'Medium' | 'Hard' | 'Very Hard' | ''>('')
   const [type, setType] = useState<'MCQ' | 'Short Answer' | 'Essay' | ''>('')
   const [status, setStatus] = useState<Question['status'] | ''>('') // (kept for UI; we fetch approved)
   const [showFilters, setShowFilters] = useState(false)
-  const [subjectQuery, setSubjectQuery] = useState('')
-  const [showAllSubjects, setShowAllSubjects] = useState(false)
-  const [expandedSubjects, setExpandedSubjects] = useState<Set<string>>(new Set())
+  const [topicQuery, settopicQuery] = useState('')
+  const [showAlltopics, setShowAlltopics] = useState(false)
+  const [expandedtopics, setExpandedtopics] = useState<Set<string>>(new Set())
   const [topicFilters, setTopicFilters] = useState<Record<string, { difficulty: string; type: string }>>({})
   const [user, setUser] = useState<{ role: Role } | null>(null)
 
   // NEW: topic + loading + error
-  const [topic, setTopic] = useState<string>('')          // <- enter topic here
   const [loading, setLoading] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -66,10 +65,10 @@ export default function QuestionBankPage() {
       const arr = await getQuestions({ topic: t, status: 'approved', limit: 500, offset: 0 })
       setQuestions(arr ?? [])
       // reset per-topic UI state when switching topic
-      setSubject('')
-      setSubjectQuery('')
-      setShowAllSubjects(false)
-      setExpandedSubjects(new Set())
+      setTopic('')
+      settopicQuery('')
+      setShowAlltopics(false)
+      setExpandedtopics(new Set())
       setTopicFilters({})
     } catch (e: any) {
       console.error('QuestionBank load error', e?.status, e?.message, e?.payload)
@@ -80,45 +79,45 @@ export default function QuestionBankPage() {
     }
   }
 
-  // Distinct subjects (display labels)
-  const subjects = useMemo(() => {
-    const base = Array.from(new Set(questions.map((q) => q.subject).filter(Boolean))) as string[]
+  // Distinct topics (display labels)
+  const topics = useMemo(() => {
+    const base = Array.from(new Set(questions.map((q) => q.topic).filter(Boolean))) as string[]
     return base.sort((a, b) => a.localeCompare(b))
   }, [questions])
 
-  // Counts per subject (used for chips)
-  const subjectCounts = useMemo(() => {
+  // Counts per topic (used for chips)
+  const topicCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const q of questions) {
-      const key = (q.subject ?? 'Uncategorized') as string
+      const key = (q.topic ?? 'Uncategorized') as string
       counts[key] = (counts[key] || 0) + 1
     }
     return counts
   }, [questions])
 
-  const filteredSubjects = useMemo(() => {
-    if (!subjectQuery.trim()) return subjects
-    const q = subjectQuery.toLowerCase()
-    return subjects.filter((s) => s.toLowerCase().includes(q))
-  }, [subjects, subjectQuery])
+  const filteredtopics = useMemo(() => {
+    if (!topicQuery.trim()) return topics
+    const q = topicQuery.toLowerCase()
+    return topics.filter((s) => s.toLowerCase().includes(q))
+  }, [topics, topicQuery])
 
   // Global filters (client-side)
   const filtered = useMemo(() => {
     return questions.filter(
       (q) =>
         (search ? q.text.toLowerCase().includes(search.toLowerCase()) : true) &&
-        (subject ? q.subject === subject : true) &&
+        (topic ? q.topic === topic : true) &&
         (difficulty ? q.difficulty === difficulty : true) &&
         (type ? q.type === type : true) &&
         (status ? q.status === status : true)
     )
-  }, [search, subject, difficulty, type, status, questions])
+  }, [search, topic, difficulty, type, status, questions])
 
-  // Group by subject (safe key)
+  // Group by topic (safe key)
   const groupedQuestions = useMemo(() => {
     const groups: Record<string, Question[]> = {}
     for (const q of filtered) {
-      const key = (q.subject ?? 'Uncategorized').trim() || 'Uncategorized'
+      const key = (q.topic ?? 'Uncategorized').trim() || 'Uncategorized'
       ;(groups[key] ??= []).push(q)
     }
     return groups
@@ -132,10 +131,10 @@ export default function QuestionBankPage() {
     )
   }
 
-  const toggleSubject = (subj: string) => {
-    const next = new Set(expandedSubjects)
+  const toggletopic = (subj: string) => {
+    const next = new Set(expandedtopics)
     next.has(subj) ? next.delete(subj) : next.add(subj)
-    setExpandedSubjects(next)
+    setExpandedtopics(next)
   }
 
   const difficultyClass = (d: 'Very Easy' | 'Easy' | 'Medium' | 'Hard' | 'Very Hard') => {
@@ -184,7 +183,7 @@ export default function QuestionBankPage() {
           <button
             onClick={() => {
               setSearch('')
-              setSubject('')
+              setTopic('')
               setDifficulty('')
               setType('')
               setStatus('')
@@ -219,10 +218,10 @@ export default function QuestionBankPage() {
             <button
               onClick={() => {
                 setSearch('')
-                setSubject('')
-                setSubjectQuery('')
-                setShowAllSubjects(false)
-                setExpandedSubjects(new Set())
+                setTopic('')
+                settopicQuery('')
+                setShowAlltopics(false)
+                setExpandedtopics(new Set())
                 setTopicFilters({})
               }}
               className="inline-flex items-center gap-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
@@ -232,23 +231,23 @@ export default function QuestionBankPage() {
           </div>
         </div>
 
-        {(subject || search) && (
+        {(topic || search) && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {search && (
               <button onClick={() => setSearch('')} className="group inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100">
                 Search: "{search}" <X className="h-3.5 w-3.5 text-gray-500 group-hover:text-gray-700" />
               </button>
             )}
-            {subject !== '' && (
-              <button onClick={() => setSubject('')} className="group inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100">
-                Topic: {subject} <X className="h-3.5 w-3.5 text-gray-500 group-hover:text-gray-700" />
+            {topic !== '' && (
+              <button onClick={() => setTopic('')} className="group inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100">
+                Topic: {topic} <X className="h-3.5 w-3.5 text-gray-500 group-hover:text-gray-700" />
               </button>
             )}
           </div>
         )}
       </div>
 
-      {/* Grouped Questions by Subject */}
+      {/* Grouped Questions by topic */}
       <div className="space-y-6">
         {!loading && filtered.length === 0 && (
           <div className="rounded-lg border border-dashed border-gray-300 bg-white p-8 text-center text-gray-600">
@@ -257,7 +256,7 @@ export default function QuestionBankPage() {
         )}
 
         {Object.entries(groupedQuestions).map(([subj, list]) => {
-          const isExpanded = expandedSubjects.has(subj)
+          const isExpanded = expandedtopics.has(subj)
           const filteredQuestions = getFilteredQuestionsForTopic(list, subj)
           const filters = topicFilters[subj] || { difficulty: '', type: '' }
 
@@ -266,7 +265,7 @@ export default function QuestionBankPage() {
               <div className="p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-3">
-                    <button onClick={() => toggleSubject(subj)} className="flex items-center gap-2 hover:bg-gray-50 p-2 rounded-lg transition-colors duration-200">
+                    <button onClick={() => toggletopic(subj)} className="flex items-center gap-2 hover:bg-gray-50 p-2 rounded-lg transition-colors duration-200">
                       <div className={`transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
                         <ChevronRight className="h-5 w-5 text-gray-500" />
                       </div>
@@ -450,21 +449,21 @@ export default function QuestionBankPage() {
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-gray-400" />
                   <input
-                    value={subjectQuery}
-                    onChange={(e) => setSubjectQuery(e.target.value)}
+                    value={topicQuery}
+                    onChange={(e) => settopicQuery(e.target.value)}
                     placeholder="Search topics"
                     className="w-full rounded-md border border-gray-300 pl-8 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
                   />
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {['', ...(showAllSubjects ? filteredSubjects : filteredSubjects.slice(0, 8))].map((s, idx) => {
-                    const active = subject === (s as any)
+                  {['', ...(showAlltopics ? filteredtopics : filteredtopics.slice(0, 8))].map((s, idx) => {
+                    const active = topic === (s as any)
                     const label = s || 'All topics'
-                    const count = s ? subjectCounts[s as any] || 0 : questions.length
+                    const count = s ? topicCounts[s as any] || 0 : questions.length
                     return (
                       <button
                         key={`${label}-${idx}`}
-                        onClick={() => setSubject(s as any)}
+                        onClick={() => setTopic(s as any)}
                         className={`rounded-full border px-3 py-1 text-xs ${
                           active ? 'border-[#ff7a59]/40 bg-[#ff7a59]/10 text-[#0f2744]' : 'border-gray-200 text-gray-700 hover:bg-gray-50'
                         }`}
@@ -476,12 +475,12 @@ export default function QuestionBankPage() {
                       </button>
                     )
                   })}
-                  {filteredSubjects.length > 8 && (
+                  {filteredtopics.length > 8 && (
                     <button
-                      onClick={() => setShowAllSubjects((v) => !v)}
+                      onClick={() => setShowAlltopics((v) => !v)}
                       className="inline-flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
                     >
-                      {showAllSubjects ? 'Show less' : 'Show more'} {showAllSubjects ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                      {showAlltopics ? 'Show less' : 'Show more'} {showAlltopics ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                     </button>
                   )}
                 </div>

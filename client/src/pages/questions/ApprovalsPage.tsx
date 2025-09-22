@@ -20,7 +20,7 @@ import {
 type ReviewHistory = { by: string; at: string; from: string; to: string; comment?: string }
 type QWithHistory = Question & { history?: ReviewHistory[] }
 
-const normalizeSubject = (s?: string | null) => {
+const normalizetopic = (s?: string | null) => {
   const v = (s ?? '').trim()
   return v ? v : 'Uncategorized'
 }
@@ -96,7 +96,7 @@ export default function ApprovalsPage() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'rejected'>('pending')
   const [selectedQuestions, setSelectedQuestions] = useState<Set<number>>(new Set())
   const [searchTerm, setSearchTerm] = useState('')
-  const [subjectFilter, setSubjectFilter] = useState<string>('all')
+  const [topicFilter, settopicFilter] = useState<string>('all')
   const [difficultyFilter, setDifficultyFilter] = useState<string>('all')
   const [typeFilter, setTypeFilter] = useState<string>('all')
   const [showFilters, setShowFilters] = useState(false)
@@ -156,8 +156,8 @@ export default function ApprovalsPage() {
         if (!txt.includes(s) && !ans.includes(s)) return false
       }
 
-      // subject
-      if (subjectFilter !== 'all' && normalizeSubject(q.subject) !== subjectFilter) return false
+      // topic
+      if (topicFilter !== 'all' && normalizetopic(q.topic) !== topicFilter) return false
 
       // difficulty
       if (difficultyFilter !== 'all' && q.difficulty !== difficultyFilter) return false
@@ -167,11 +167,11 @@ export default function ApprovalsPage() {
 
       return true
     })
-  }, [allQuestions, statusFilter, searchTerm, subjectFilter, difficultyFilter, typeFilter])
+  }, [allQuestions, statusFilter, searchTerm, topicFilter, difficultyFilter, typeFilter])
 
-  const subjects = useMemo(() => {
+  const topics = useMemo(() => {
     const unique = new Set<string>()
-    for (const q of allQuestions) unique.add(normalizeSubject(q.subject))
+    for (const q of allQuestions) unique.add(normalizetopic(q.topic))
     return [...unique].sort((a, b) => a.localeCompare(b))
   }, [allQuestions])
 
@@ -324,12 +324,12 @@ export default function ApprovalsPage() {
         {showFilters && (
           <div className="mt-6 grid gap-6 border-t border-gray-200 pt-6 sm:grid-cols-2 lg:grid-cols-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Subject</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">topic</label>
               <SelectControl
-                value={subjectFilter}
-                onChange={(v) => setSubjectFilter(v)}
-                options={['all', ...subjects]}
-                renderLabel={(v) => (v === 'all' ? 'All Subjects' : v)}
+                value={topicFilter}
+                onChange={(v) => settopicFilter(v)}
+                options={['all', ...topics]}
+                renderLabel={(v) => (v === 'all' ? 'All topics' : v)}
               />
             </div>
             <div>
@@ -459,7 +459,7 @@ export default function ApprovalsPage() {
                       {/* Metadata */}
                       <div className="flex flex-wrap gap-2 mb-4">
                         <span className="rounded-lg bg-[#0f2744]/10 text-[#0f2744] px-3 py-1.5 text-xs font-medium border border-[#0f2744]/20">
-                          {normalizeSubject(q.subject)}
+                          {normalizetopic(q.topic)}
                         </span>
                         <span className="rounded-lg bg-[#0f2744]/10 text-[#0f2744] px-3 py-1.5 text-xs font-medium border border-[#0f2744]/20">
                           {q.difficulty}

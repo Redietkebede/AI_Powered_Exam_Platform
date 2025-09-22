@@ -29,6 +29,128 @@ const DeleteSchema = z.object({
   hard: z.coerce.boolean().optional().default(false),
 });
 
+async function getQuestionColumns() {
+  const wanted = [
+    "status",
+    "is_published",
+    "published_at",
+    "published_by",
+    "topic",
+    "difficulty",
+    "type",
+  ];
+  const q = `
+    SELECT column_name, data_type
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name   = 'questions'
+      AND column_name  = ANY($1::text[])
+  `;
+  const res = await pool.query(q, [wanted]);
+  const cols = new Map<string, string>();
+  for (const r of res.rows) cols.set(r.column_name, r.data_type ?? "");
+  return cols;
+}
+
+function buildPublishedPredicate(
+  cols: Map<string, string>,
+  paramIndexStart = 1
+) {
+  // normalize status from query if provided
+  const pubExprs: string[] = [];
+  const params: any[] = [];
+  let i = paramIndexStart;
+
+  // Default to 'published'; accept UI 'approved'
+  const statusVal = "published";
+
+  if (cols.has("status")) {
+    params.push(statusVal);
+    pubExprs.push(`LOWER(q.status) = $${i++}`);
+    pubExprs.push(`LOWER(q.status) = 'approved'`);
+  }
+  if (cols.has("is_published")) pubExprs.push(`q.is_published = TRUE`);
+  if (cols.has("published_at")) pubExprs.push(`q.published_at IS NOT NULL`);
+  if (cols.has("published_by")) pubExprs.push(`q.published_by IS NOT NULL`);
+
+  const pred = pubExprs.length ? `(${pubExprs.join(" OR ")})` : "TRUE";
+  return { pred, params, nextIndex: i };
+}
+
+/** GET /questions/topics -> [{ topic, available }] */
+export const listTopicsWithCounts: RequestHandler = async (req, res) => {
+  try {
+    const cols = await getQuestionColumns();
+    const { pred, params } = buildPublishedPredicate(cols, 1);
+
+    const hasTopic = cols.has("topic");
+    if (!hasTopic) return res.json([]); // no topic column -> nothing to show
+
+    const sql = `
+      SELECT q.topic AS topic, COUNT(*)::int AS available
+      FROM questions q
+      WHERE ${pred}
+        AND TRIM(COALESCE(q.topic, '')) <> ''
+      GROUP BY q.topic
+      HAVING COUNT(*) > 0
+      ORDER BY LOWER(q.topic) ASC
+    `;
+    const r = await pool.query(sql, params);
+    return res.json(r.rows);
+  } catch (err: any) {
+    console.error("listTopicsWithCounts error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to list topics" });
+  }
+};
+
+/** GET /questions/available?topic=Rust&type=MCQ -> { topic, type, available } */
+export const countAvailableForTopic: RequestHandler = async (req, res) => {
+  try {
+    const topic = String(req.query.topic ?? "").trim();
+    const type = String(req.query.type ?? "").trim(); // optional
+
+    const cols = await getQuestionColumns();
+    if (!cols.has("topic")) {
+      return res.json({ topic, type, available: 0 });
+    }
+
+    const whereParts: string[] = [];
+    const params: any[] = [];
+    let i = 1;
+
+    const pub = buildPublishedPredicate(cols, i);
+    whereParts.push(pub.pred);
+    params.push(...pub.params);
+    i = pub.nextIndex;
+
+    params.push(topic);
+    whereParts.push(`LOWER(q.topic) = LOWER($${i++}::text)`);
+
+    if (type && cols.has("type")) {
+      params.push(type);
+      whereParts.push(`LOWER(q.type::text) = LOWER($${i++}::text)`);
+    }
+
+    const sql = `
+      SELECT COUNT(*)::int AS available
+      FROM questions q
+      WHERE ${whereParts.join(" AND ")}
+    `;
+    const r = await pool.query(sql, params);
+
+    return res.json({
+      topic,
+      type,
+      available: r.rows?.[0]?.available ?? 0,
+    });
+  } catch (err: any) {
+    console.error("countAvailableForTopic error:", err?.message || err);
+    return res
+      .status(500)
+      .json({ error: "Failed to count available questions" });
+  }
+};
+
 export const ManualCreateSchema = z.object({
   question_text: z.string().min(1),
   options: z.array(z.string().trim()).default([]), // [] for non-MCQ
@@ -229,6 +351,175 @@ export const listQuestions: RequestHandler = async (req, res) => {
   }
 };
 
+// GET /questions/published?topic=...&difficulty=...&limit=...&offset=...
+export const listPublishedQuestions: RequestHandler = async (req, res) => {
+  try {
+    const topicRaw = String(req.query.topic ?? "").trim();
+    const diffRaw = String(req.query.difficulty ?? "").trim();
+    const limit = Math.max(1, Math.min(2000, Number(req.query.limit) || 1000));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+
+    // Optional status override from query (normalize UI wording)
+    const statusRaw = String(req.query.status ?? "")
+      .trim()
+      .toLowerCase();
+    const normalizedStatus =
+      statusRaw === "approved" ? "published" : statusRaw || "published";
+
+    // Columns we may reference for filtering and selecting
+    const wanted = Array.from(
+      new Set([
+        // publish-state columns
+        "status",
+        "is_published",
+        "published_at",
+        "published_by",
+        // filter columns
+        "topic",
+        "difficulty",
+        // safe select columns (explicitly omit correct_answer)
+        "id",
+        "question_text",
+        "options",
+        "type",
+        "created_at",
+      ])
+    );
+
+    const colsRes = await pool.query(
+      `
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name   = 'questions'
+          AND column_name  = ANY($1::text[])
+      `,
+      [wanted]
+    );
+
+    // Map: column name -> data_type
+    const cols = new Map<string, string>();
+    for (const r of colsRes.rows) cols.set(r.column_name, r.data_type ?? "");
+
+    // --------------------- Build WHERE parts & params ---------------------
+    const whereParts: string[] = [];
+    const params: any[] = [];
+    let i = 1;
+
+    // "Published" predicate: OR across whichever columns exist
+    const pubExprs: string[] = [];
+    if (cols.has("status")) {
+      params.push(normalizedStatus);
+      pubExprs.push(`LOWER(q.status) = $${i++}`);
+      // Also tolerate legacy "approved" rows if they exist
+      pubExprs.push(`LOWER(q.status) = 'approved'`);
+    }
+    if (cols.has("is_published")) {
+      pubExprs.push(`q.is_published = TRUE`);
+    }
+    if (cols.has("published_at")) {
+      pubExprs.push(`q.published_at IS NOT NULL`);
+    }
+    if (cols.has("published_by")) {
+      pubExprs.push(`q.published_by IS NOT NULL`);
+    }
+    // If nothing is known, default TRUE (shouldn't happen with current schema)
+    whereParts.push(pubExprs.length ? `(${pubExprs.join(" OR ")})` : "TRUE");
+
+    // Topic filter only if column exists and a topic was provided
+    const useTopic = cols.has("topic") && topicRaw !== "";
+    if (useTopic) {
+      params.push(topicRaw);
+      whereParts.push(`LOWER(q.topic) = LOWER($${i++}::text)`);
+    }
+
+    // Difficulty filter — handle numeric or text schemas
+    const hasDiff = cols.has("difficulty");
+    const diffType = cols.get("difficulty") || "";
+    const diffIsNumeric = /int|numeric|decimal|real|double/i.test(diffType);
+
+    const labelToNum: Record<string, number> = {
+      "very easy": 1,
+      easy: 2,
+      medium: 3,
+      hard: 4,
+      "very hard": 5,
+      "1": 1,
+      "2": 2,
+      "3": 3,
+      "4": 4,
+      "5": 5,
+    };
+
+    if (hasDiff && diffRaw) {
+      if (diffIsNumeric) {
+        const mapped = labelToNum[diffRaw.toLowerCase()];
+        const asNum = Number.isFinite(mapped) ? mapped : Number(diffRaw);
+        if (Number.isFinite(asNum)) {
+          params.push(asNum);
+          whereParts.push(`q.difficulty = $${i++}::int`);
+        }
+        // else: unknown label -> skip difficulty filter
+      } else {
+        params.push(diffRaw);
+        whereParts.push(
+          `LOWER(TRIM(q.difficulty::text)) = LOWER(TRIM($${i++}::text))`
+        );
+      }
+    }
+
+    const whereSQL = whereParts.length
+      ? `WHERE ${whereParts.join(" AND ")}`
+      : "";
+
+    // --------------------------- SELECT list ------------------------------
+    const selectable = [
+      "id",
+      "question_text",
+      "options",
+      "difficulty",
+      "topic",
+      "type",
+      "created_at",
+    ];
+    const selectCols: string[] = [];
+    for (const c of selectable) {
+      if (cols.has(c)) selectCols.push(`q.${c}`);
+    }
+    if (!selectCols.length) selectCols.push("q.id"); // minimal
+
+    // ------------------------------ Query --------------------------------
+    params.push(limit);
+    params.push(offset);
+
+    const sql = `
+      SELECT ${selectCols.join(", ")}
+      FROM questions q
+      ${whereSQL}
+      ORDER BY q.id ASC
+      LIMIT $${i++} OFFSET $${i++}
+    `;
+
+    const r = await pool.query(sql, params);
+
+    // Extra safety: strip correct_answer if a view/trigger added it anyway
+    const sanitized = r.rows.map((row: any) => {
+      if ("correct_answer" in row) {
+        const { correct_answer, ...rest } = row;
+        return rest;
+      }
+      return row;
+    });
+
+    return res.json(sanitized);
+  } catch (err: any) {
+    console.error("listPublishedQuestions error:", err?.message || err);
+    return res
+      .status(500)
+      .json({ error: "Failed to list published questions" });
+  }
+};
+
 export async function insertMany(
   questions: Parameters<typeof insertQuestion>[0][]
 ) {
@@ -335,6 +626,8 @@ export const deleteQuestionById: RequestHandler = async (req, res) => {
           "Cannot hard-delete: other records reference this question. Use soft delete or add ON DELETE CASCADE.",
       });
     }
-    return res.status(500).json({ error: "failed to delete", details: e.message });
+    return res
+      .status(500)
+      .json({ error: "failed to delete", details: e.message });
   }
 };

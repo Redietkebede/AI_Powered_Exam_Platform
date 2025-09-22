@@ -15,7 +15,7 @@ export function logBadGen(
     )}\n`;
     fs.appendFileSync(file, line, { encoding: "utf8" });
   } catch {
-    // fallback to console if filesystem unavailable
+    // fallback to console if filesyquestion_text unavailable
     console.warn("logBadGen fallback:", kind, payload);
   }
 }

@@ -59,4 +59,5 @@ export const verifyToken: RequestHandler = async (req, res, next) => {
     console.error("verifyToken error:", e);
     res.status(403).json({ error: "Unauthorized or token expired" });
   }
+  console.log("authz", req.user?.id, req.user?.role);
 };

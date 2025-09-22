@@ -1,74 +1,21 @@
-import { useMemo, useState, useEffect } from "react";
-import { Link } from "react-router-dom";
+// client/src/pages/assignments/AssignmentsPage.tsx
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { Play, Trash2 } from "lucide-react";
+
 import { getUsers } from "../../services/userService";
 import { getQuestions } from "../../services/questionService";
-import type { Question } from "../../types/question";
-import { Trash2, Copy, Play } from "lucide-react";
 import {
   createAssignmentSvc,
   getAssignmentsSvc,
+  deleteAssignmentSvc,
 } from "../../services/assignmentService";
 
-/* ------------ Types (local, no API changes) ------------ */
+import type { Question } from "../../types/question";
 
-type DifficultyLabel = Question["difficulty"];
-type QType = Question["type"];
-
-type ExamConfig = {
-  topics: string[];
-  allowedDifficulties: DifficultyLabel[];
-  allowedTypes: QType[];
-  questionCount: number;
-  adaptive: boolean;
-  randomizeOrder: boolean;
-  timeLimitMinutes?: number;
-};
-
-// Map 1..5 -> labels; pass strings through
-// 1..5 -> labels; pass labels through; default Medium
-function toDiffLabel(d: unknown) {
-  if (typeof d === "number" && Number.isFinite(d)) {
-    const map = ["Very Easy", "Easy", "Medium", "Hard", "Very Hard"] as const;
-    const i = Math.min(5, Math.max(1, Math.floor(d))) - 1;
-    return map[i];
-  }
-  const s = String(d ?? "").trim();
-  return (["Very Easy","Easy","Medium","Hard","Very Hard"] as const).includes(s as any)
-    ? (s as any)
-    : "Medium";
-}
-
-function toTypeLabel(t: unknown) {
-  const s = String(t ?? "").trim().toUpperCase();
-  if (s === "MCQ") return "MCQ";
-  if (s === "SHORT ANSWER") return "Short Answer";
-  if (s === "ESSAY") return "Essay";
-  return "MCQ";
-}
-
-// accept published OR approved
-function isAssignableStatus(s: unknown) {
-  const v = String(s ?? "").toLowerCase();
-  return v === "published" || v === "approved";
-}
-
-// prefer DB `topic`, fallback to legacy `subject`
-function getTopic(q: any) {
-  return (q?.topic ?? q?.subject ?? "").trim() || "Uncategorized";
-}
-
-type ScheduleWindow = { startAt?: string; dueAt?: string };
-
-type Assignment = {
-  id: string;
-  candidateIds: string[];
-  questionIds: number[];
-  config: ExamConfig;
-  schedule: ScheduleWindow;
-  status: "scheduled" | "active" | "expired";
-  createdAt: string;
-  createdBy?: string;
-};
+/* -------------------------------------------------------
+   Helpers & Local Types
+------------------------------------------------------- */
 
 type UserRole = "admin" | "editor" | "recruiter" | "candidate";
 type User = {
@@ -77,13 +24,50 @@ type User = {
   email: string;
   role: UserRole;
 };
-type Candidate = User & { role: "candidate" };
-type Recruiter = User & { role: "recruiter" };
 
-const isCandidate = (u: User): u is Candidate => u.role === "candidate";
-const isRecruiter = (u: User): u is Recruiter => u.role === "recruiter";
+const isCandidate = (u: User) => u.role === "candidate";
+const isRecruiter = (u: User) => u.role === "recruiter";
 
-/* ------------ Utilities ------------ */
+type QType = Question["type"];
+type DifficultyLabel = Question["difficulty"]; // kept for typing only
+
+type ExamConfig = {
+  topics: string[];
+  allowedDifficulties: DifficultyLabel[]; // compatibility; unused in filtering now
+  allowedTypes: QType[];
+  questionCount: number;
+  adaptive: boolean;
+  randomizeOrder: boolean;
+  timeLimitMinutes?: number;
+};
+
+type ScheduleWindow = { startAt?: string; dueAt?: string };
+
+function toTypeLabel(t: unknown): QType {
+  const s = String(t ?? "")
+    .trim()
+    .toUpperCase();
+  if (s === "MCQ") return "MCQ";
+  return "MCQ";
+}
+
+function getTopic(q: any): string {
+  return String(q?.topic ?? q?.subject ?? "").trim() || "Uncategorized";
+}
+
+function normalizeTopic(s?: string | null): string {
+  const v = (s ?? "").trim();
+  return v || "Uncategorized";
+}
+
+function isAssignable(q: any) {
+  // If the question has no status (common for /questions/published), treat it as assignable.
+  if (!("status" in (q ?? {}))) return true;
+
+  const st = String(q?.status ?? "").toLowerCase();
+  // recruiter can assign only published/approved questions
+  return st === "published" || st === "approved";
+}
 
 function formatDateTimeLocal(value?: string) {
   if (!value) return "";
@@ -98,106 +82,67 @@ function formatDateTimeLocal(value?: string) {
   }
 }
 
-function computeStatus(
-  sched: ScheduleWindow,
-  now = new Date()
-): Assignment["status"] {
-  const start = sched.startAt ? new Date(sched.startAt) : undefined;
-  const due = sched.dueAt ? new Date(sched.dueAt) : undefined;
-  if (start && now < start) return "scheduled";
-  if (due && now > due) return "expired";
-  return "active";
-}
+/* ---------- assignment list normalizers & predicates ---------- */
 
-function normalizeTopic(s?: string | null): string {
-  const v = (s ?? "").trim();
-  return v ? v : "Uncategorized";
-}
+type AnyRow = Record<string, any>;
 
-/* ------------ Component ------------ */
+const normalizeList = (data: any): AnyRow[] => {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.items)) return data.items;
+  if (Array.isArray(data.sessions)) return data.sessions;
+  if (Array.isArray(data.rows)) return data.rows;
+  if (Array.isArray(data.data)) return data.data;
+  return [];
+};
+
+const toSessionId = (row: AnyRow): string | null => {
+  const id =
+    row.id ?? row.sessionId ?? row.session_id ?? row.session?.id ?? null;
+  return id != null ? String(id) : null;
+};
+
+const isFinished = (row: AnyRow): boolean => {
+  const finished =
+    row.finished_at ?? row.finishedAt ?? row.session?.finished_at ?? null;
+  const st = String(row.status ?? row.session?.status ?? "").toLowerCase();
+  return (
+    Boolean(finished) ||
+    ["completed", "finished", "closed", "expired"].includes(st)
+  );
+};
+
+/* -------------------------------------------------------
+   Component
+------------------------------------------------------- */
 
 export default function AssignmentsPage() {
-  // UI state
+  const navigate = useNavigate();
+
+  // stepper
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+
+  // users
+  const [users, setUsers] = useState<User[]>([]);
+  const [candidates, setCandidates] = useState<User[]>([]);
+  const [recruiters, setRecruiters] = useState<User[]>([]);
+  const [candidateQuery, setCandidateQuery] = useState("");
+
+  // assignments
+  const [assignments, setAssignments] = useState<AnyRow[]>([]);
+  const [viewMode] = useState<"simple" | "detailed">("simple");
+  const [density] = useState<"comfortable" | "compact">("comfortable");
+
+  // selection
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>(
     []
   );
-  const [candidateQuery, setCandidateQuery] = useState("");
-  const [topicQuery, setTopicQuery] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [step, setStep] = useState<1 | 2 | 3>(1);
-  const [list, setList] = useState<Assignment[]>([]);
-  const [density, setDensity] = useState<"comfortable" | "compact">(
-    "comfortable"
-  );
-  const [viewMode, setViewMode] = useState<"detailed" | "simple">("simple");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-  const [users, setUsers] = useState<User[]>([]);
-  const [recruiters, setRecruiters] = useState<User[]>([]);
-  const [candidates, setCandidates] = useState<User[]>([]);
 
-  // Live questions
+  // questions (published pool for topic/type counts)
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [topicQuery, setTopicQuery] = useState("");
 
-  useEffect(() => {
-  if (questions.length) {
-    console.log("sample question", questions[0]);
-  }
-}, [questions]);
-
-
-  // Users
-  useEffect(() => {
-    let alive = true;
-    getUsers()
-      .then((list) => {
-        if (!alive) return;
-        const u = list as User[];
-        setUsers(u);
-        setRecruiters(u.filter(isRecruiter));
-        setCandidates(u.filter(isCandidate));
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // Questions
-  useEffect(() => {
-    let alive = true;
-    getQuestions({ topic: "" })
-      .then((qs) => {
-        if (!alive) return;
-        setQuestions(qs);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // Assignments (from backend)
-  useEffect(() => {
-    let alive = true;
-    getAssignmentsSvc()
-      .then((items) => {
-        if (!alive) return;
-        setList(Array.isArray(items) ? items : []);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // Only approved questions for assignment pool
-  const allApprovedQuestions = useMemo(
-   () => questions.filter((q) => isAssignableStatus(q.status)),
-   [questions]
- );
-
-  // Config state
+  // config (difficulty kept for compatibility but unused for filtering)
   const [config, setConfig] = useState<ExamConfig>({
     topics: [],
     allowedDifficulties: ["Very Easy", "Easy", "Medium", "Hard", "Very Hard"],
@@ -213,88 +158,151 @@ export default function AssignmentsPage() {
     dueAt: "",
   });
 
-  // Topics from live questions (switch from subject -> topic)
-  const subjects = useMemo<string[]>(
+  /* ---------------- data loads ---------------- */
+
+  useEffect(() => {
+    let alive = true;
+    getUsers()
+      .then((list) => {
+        if (!alive) return;
+        const u = (Array.isArray(list) ? list : []) as User[];
+        setUsers(u);
+        setCandidates(u.filter(isCandidate));
+        setRecruiters(u.filter(isRecruiter));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    // pull only published (BE enforces; we just ask large limit)
+    getQuestions({ status: "published", limit: 1000 })
+      .then((qs) => alive && setQuestions(Array.isArray(qs) ? qs : []))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // load assignments once (normalized)
+  useEffect(() => {
+    let alive = true;
+    getAssignmentsSvc()
+      .then((rows) => {
+        if (!alive) return;
+        setAssignments(normalizeList(rows));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /* ---------------- derived sets ---------------- */
+
+  // We already query published-only, so no extra filtering needed.
+  const allApprovedQuestions = useMemo(() => questions, [questions]);
+
+  // all topics present in published questions
+  const topics = useMemo<string[]>(
     () =>
       Array.from(
-        new Set(
-          allApprovedQuestions.map((q) =>
-            normalizeTopic(getTopic(q))
-          )
-        )
+        new Set(allApprovedQuestions.map((q) => normalizeTopic(getTopic(q))))
       ).sort((a, b) => a.localeCompare(b)),
     [allApprovedQuestions]
   );
 
-  // Counts per topic given current difficulty/type filters
-  const subjectCountsByFilter = useMemo(() => {
+  // count of questions per topic given TYPE filter
+  const topicCountsByFilter = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const q of allApprovedQuestions) {
-      if (
-        !config.allowedDifficulties.includes(
-          toDiffLabel(q.difficulty) as DifficultyLabel
-        )
-      )
-        continue;
-      if (!config.allowedTypes.includes(toTypeLabel(q.type) as any)) continue;
-      const key = normalizeTopic((q as any).topic as string);
-      counts[key] = (counts[key] || 0) + 1;
+      const typeOk = config.allowedTypes.includes(toTypeLabel((q as any).type));
+      if (!typeOk) continue;
+      const t = normalizeTopic(getTopic(q));
+      counts[t] = (counts[t] || 0) + 1;
     }
     return counts;
-  }, [allApprovedQuestions, config.allowedDifficulties, config.allowedTypes]);
+  }, [allApprovedQuestions, config.allowedTypes]);
 
-  // Preview pool size (topics + filters)
+  // pool size preview: topics + type filter (difficulty no longer filters)
   const poolSize = useMemo(() => {
-   return allApprovedQuestions.filter((q) => {
-     const key = normalizeTopic(getTopic(q));
-     const okTopic = config.topics.length === 0 || config.topics.includes(key);
-     const okDiff = config.allowedDifficulties.includes(toDiffLabel((q as any).difficulty));
-     const okType = config.allowedTypes.includes(toTypeLabel((q as any).type) as any);
-     return okTopic && okDiff && okType;
-   }).length;
- }, [allApprovedQuestions, config.topics, config.allowedDifficulties, config.allowedTypes]);
+    const selectedTopics = config.topics ?? [];
+    const allowedTypes = config.allowedTypes ?? [];
+    const allowAllTypes = allowedTypes.length === 0;
 
-  // Sampling helper
-  function pickQuestions(): number[] {
-    const pool = allApprovedQuestions.filter((q) => {
-   const key = normalizeTopic(getTopic(q));
-   const okTopic = config.topics.length === 0 || config.topics.includes(key);
-   const okDiff = config.allowedDifficulties.includes(toDiffLabel((q as any).difficulty));
-   const okType = config.allowedTypes.includes(toTypeLabel((q as any).type) as any);
-   return okTopic && okDiff && okType;
-    });
-    const shuffled = [...pool].sort(() => Math.random() - 0.5);
-    return shuffled
-      .slice(0, Math.max(0, config.questionCount))
-      .map((q) => q.id as number);
-  }
+    return allApprovedQuestions.filter((q) => {
+      const t = normalizeTopic(getTopic(q));
+      const okTopic = selectedTopics.length === 0 || selectedTopics.includes(t);
+      const typeLabel = toTypeLabel((q as any).type);
+      const okType = allowAllTypes || allowedTypes.includes(typeLabel);
+      return okTopic && okType;
+    }).length;
+  }, [allApprovedQuestions, config.topics, config.allowedTypes]);
+
+  // show only "open" assignments
+  const openAssignments = useMemo(() => {
+    return normalizeList(assignments).filter(
+      (r) => !isFinished(r) && toSessionId(r)
+    );
+  }, [assignments]);
+
+  /* ---------------- actions ---------------- */
 
   async function createAssignment() {
     if (selectedCandidateIds.length === 0) return;
-    const questionIds = pickQuestions();
-    if (questionIds.length === 0) return;
+
+    // pick a single topic (first selected; otherwise most-populated)
+    const topic = config.topics[0] ?? topics[0] ?? "";
+    if (!topic) return;
 
     const payload = {
       candidateIds: selectedCandidateIds.map(String),
-      questionIds,
-      config,
+      questionIds: [], // questions are fetched by candidate flow later
+      config: {
+        topic,
+        count: config.questionCount,
+        // optionally: time limit/types if BE uses them
+      },
       schedule,
     };
 
-    // IMPORTANT: call the API service (was recursively calling itself)
-    await createAssignmentSvc(payload);
-
-    // Refresh assignments from server
     try {
-      const fresh = await getAssignmentsSvc();
-      setList(Array.isArray(fresh) ? fresh : []);
-    } catch {
-      // ignore
-    }
+      const res = await createAssignmentSvc(payload as any);
+      const sessionId = (res as any)?.sessionId ?? (res as any)?.id;
+      if (sessionId) navigate(`/app/sessions/${sessionId}`);
 
-    setSelectedCandidateIds([]);
-    setStep(1);
+      // refresh list to show newly created
+      const fresh = await getAssignmentsSvc();
+      setAssignments(normalizeList(fresh));
+
+      // reset wizard
+      setSelectedCandidateIds([]);
+      setStep(1);
+    } catch (e: any) {
+      const sid = e?.sessionId ?? e?.data?.sessionId;
+      if (sid) {
+        navigate(`/app/sessions/${sid}`);
+        return;
+      }
+      console.error("Failed to create session", e);
+      alert(e?.error || e?.message || "Failed to create session");
+    }
   }
+
+  async function removeAssignment(id: string) {
+    try {
+      await deleteAssignmentSvc(id);
+      const fresh = await getAssignmentsSvc();
+      setAssignments(normalizeList(fresh));
+    } catch (e) {
+      console.error("Failed to delete", e);
+    }
+  }
+
+  /* ---------------- render ---------------- */
 
   return (
     <div className="space-y-6">
@@ -313,7 +321,7 @@ export default function AssignmentsPage() {
             </p>
           </div>
           <div className="text-xs text-gray-600">
-            {list.length} total assignments
+            {openAssignments.length} open assignments
           </div>
         </div>
       </div>
@@ -350,87 +358,57 @@ export default function AssignmentsPage() {
           ))}
         </div>
 
+        {/* Step 1: Candidates */}
         {step === 1 && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium text-gray-700">
-                Select candidates
-              </div>
-              <div className="flex items-center gap-2">
+          <div className="space-y-6">
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-medium text-gray-700">
+                  Candidates
+                </div>
                 <input
                   value={candidateQuery}
                   onChange={(e) => setCandidateQuery(e.target.value)}
-                  placeholder="Search by name or email"
-                  className="w-56 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
+                  placeholder="Search candidates"
+                  className="w-56 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0f2744]/40 focus:border-[#0f2744]"
                 />
-                <button
-                  onClick={() =>
-                    setSelectedCandidateIds(candidates.map((c) => String(c.id)))
-                  }
-                  className="inline-flex items-center gap-1 rounded-xl border border-slate-300/70 bg-gradient-to-r from-slate-100 to-slate-200 px-3 py-2 text-xs font-medium text-slate-800 shadow-sm hover:from-slate-200 hover:to-slate-300 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#ff7a59]/40"
-                >
-                  Select all
-                </button>
-                <button
-                  onClick={() => setSelectedCandidateIds([])}
-                  className="inline-flex items-center gap-1 rounded-xl border border-slate-300/70 bg-gradient-to-r from-slate-100 to-slate-200 px-3 py-2 text-xs font-medium text-slate-800 shadow-sm hover:from-slate-200 hover:to-slate-300 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#ff7a59]/40"
-                >
-                  Clear
-                </button>
               </div>
-            </div>
 
-            <div className="max-h-64 overflow-auto rounded-lg border border-gray-200 p-3">
-              {candidates
-                .filter((c) =>
-                  candidateQuery
-                    ? (c.name + " " + c.email)
-                        .toLowerCase()
-                        .includes(candidateQuery.toLowerCase())
-                    : true
-                )
-                .map((c) => {
-                  const id = String(c.id);
-                  const checked = selectedCandidateIds.includes(id);
-                  return (
-                    <label
-                      key={id}
-                      className={`group flex cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-[#0f2744]/5 ${
-                        checked
-                          ? "bg-[#ff7a59]/10 border border-[#ff7a59]/30"
-                          : ""
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <input
-                          className="accent-gray-600"
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() =>
-                            setSelectedCandidateIds((prev) =>
-                              prev.includes(id)
-                                ? prev.filter((x) => x !== id)
-                                : [...prev, id]
-                            )
-                          }
-                        />
-                        <span className="text-gray-800">{c.name}</span>
-                      </div>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs ${
-                          checked
-                            ? "bg-[#ff7a59]/20 text-[#0f2744]"
-                            : "bg-[#0f2744]/10 text-[#0f2744]"
+              <div className="flex flex-wrap gap-2">
+                {candidates
+                  .filter((c) =>
+                    candidateQuery
+                      ? `${c.name} ${c.email}`
+                          .toLowerCase()
+                          .includes(candidateQuery.toLowerCase())
+                      : true
+                  )
+                  .map((c) => {
+                    const active = selectedCandidateIds.includes(String(c.id));
+                    return (
+                      <button
+                        key={String(c.id)}
+                        onClick={() =>
+                          setSelectedCandidateIds((list) =>
+                            active
+                              ? list.filter((id) => id !== String(c.id))
+                              : [...list, String(c.id)]
+                          )
+                        }
+                        className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
+                          active
+                            ? "border-[#ff7a59]/40 bg-[#ff7a59]/10 text-[#0f2744]"
+                            : "border-[#0f2744]/20 text-[#0f2744] hover:bg-[#0f2744]/5"
                         }`}
                       >
-                        {c.email}
-                      </span>
-                    </label>
-                  );
-                })}
-              {candidates.length === 0 && (
-                <div className="text-sm text-gray-500">No candidates</div>
-              )}
+                        <span>{c.name}</span>
+                        <span className="rounded-full bg-[#0f2744]/10 px-2 py-0.5 text-[10px] text-[#0f2744]">
+                          {c.email}
+                        </span>
+                      </button>
+                    );
+                  })}
+              </div>
             </div>
 
             <div className="flex items-center justify-end">
@@ -445,8 +423,10 @@ export default function AssignmentsPage() {
           </div>
         )}
 
+        {/* Step 2: Configuration (no Advanced section; Types & Time limit are here) */}
         {step === 2 && (
           <div className="space-y-6">
+            {/* Topics */}
             <div>
               <div className="mb-2 flex items-center justify-between">
                 <div className="text-sm font-medium text-gray-700">Topics</div>
@@ -459,7 +439,7 @@ export default function AssignmentsPage() {
                   />
                   <button
                     onClick={() =>
-                      setConfig((cfg) => ({ ...cfg, topics: subjects.slice() }))
+                      setConfig((cfg) => ({ ...cfg, topics: topics.slice() }))
                     }
                     className="inline-flex items-center gap-1 rounded-xl border border-slate-300/70 bg-gradient-to-r from-slate-100 to-slate-200 px-3 py-2 text-xs font-medium text-slate-800 shadow-sm hover:from-slate-200 hover:to-slate-300 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#ff7a59]/40"
                   >
@@ -475,7 +455,7 @@ export default function AssignmentsPage() {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                {subjects
+                {topics
                   .filter((s) =>
                     topicQuery
                       ? s.toLowerCase().includes(topicQuery.toLowerCase())
@@ -483,12 +463,12 @@ export default function AssignmentsPage() {
                   )
                   .sort(
                     (a, b) =>
-                      (subjectCountsByFilter[b] || 0) -
-                      (subjectCountsByFilter[a] || 0)
+                      (topicCountsByFilter[b] || 0) -
+                      (topicCountsByFilter[a] || 0)
                   )
                   .map((s) => {
                     const active = config.topics.includes(s);
-                    const count = subjectCountsByFilter[s] || 0;
+                    const count = topicCountsByFilter[s] || 0;
                     return (
                       <button
                         key={s}
@@ -524,15 +504,16 @@ export default function AssignmentsPage() {
               <div className="mt-3 flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700">
                 <span>Available questions with current selection</span>
                 <span
-                  className={`${
+                  className={
                     poolSize === 0 ? "text-rose-600" : "text-[#0f2744]"
-                  }`}
+                  }
                 >
                   {poolSize}
                 </span>
               </div>
             </div>
 
+            {/* Core config row */}
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700">
@@ -545,13 +526,12 @@ export default function AssignmentsPage() {
                   value={String(config.questionCount)}
                   onChange={(e) => {
                     const digits = e.target.value.replace(/[^0-9]/g, "");
-                    const n = Math.max(0, Math.min(50, Number(digits) || 0));
+                    const n = Math.max(1, Math.min(50, Number(digits) || 1));
                     setConfig((cfg) => ({ ...cfg, questionCount: n }));
                   }}
                   className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0f2744]/40 focus:border-[#0f2744]"
                 />
               </div>
-
               <label className="flex items-center gap-2 text-sm text-gray-800">
                 <input
                   className="accent-gray-600"
@@ -563,7 +543,6 @@ export default function AssignmentsPage() {
                 />
                 Adaptive mode
               </label>
-
               <label className="flex items-center gap-2 text-sm text-gray-800">
                 <input
                   className="accent-gray-600"
@@ -580,122 +559,55 @@ export default function AssignmentsPage() {
               </label>
             </div>
 
-            {false && config.questionCount > poolSize && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                Requested count exceeds available pool ({poolSize}). The exam
-                will use all available questions.
-              </div>
-            )}
-
-            <div className="rounded-lg border border-gray-200">
-              <button
-                onClick={() => setShowAdvanced((v) => !v)}
-                className="flex w-full items-center justify-between px-3 py-2 text-sm"
-              >
-                <span className="font-medium text-[#0f2744]">
-                  Advanced options
-                </span>
-                <span className="text-[#0f2744]">
-                  {showAdvanced ? "Hide" : "Show"}
-                </span>
-              </button>
-
-              {showAdvanced && (
-                <div className="grid gap-4 border-t border-gray-200 p-3 sm:grid-cols-2">
-                  <div>
-                    <div className="mb-2 text-sm font-medium text-[#0f2744]">
-                      Difficulties
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {(
-                        [
-                          "Very Easy",
-                          "Easy",
-                          "Medium",
-                          "Hard",
-                          "Very Hard",
-                        ] as const
-                      ).map((d) => {
-                        const active = config.allowedDifficulties.includes(d);
-                        return (
-                          <button
-                            key={d}
-                            onClick={() =>
-                              setConfig((cfg) => ({
-                                ...cfg,
-                                allowedDifficulties: active
-                                  ? cfg.allowedDifficulties.filter(
-                                      (x) => x !== d
-                                    )
-                                  : [...cfg.allowedDifficulties, d],
-                              }))
-                            }
-                            className={`rounded-full border px-3 py-1 text-xs ${
-                              active
-                                ? "border-[#0f2744]/40 bg-[#0f2744]/10 text-[#0f2744]"
-                                : "border-[#0f2744]/20 text-[#0f2744] hover:bg-[#0f2744]/5"
-                            }`}
-                          >
-                            {d}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="mb-2 text-sm font-medium text-[#0f2744]">
-                      Types
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {(["MCQ"] as const).map((t) => {
-                        const active = config.allowedTypes.includes(t);
-                        return (
-                          <button
-                            key={t}
-                            onClick={() =>
-                              setConfig((cfg) => ({
-                                ...cfg,
-                                allowedTypes: active
-                                  ? cfg.allowedTypes.filter((x) => x !== t)
-                                  : [...cfg.allowedTypes, t],
-                              }))
-                            }
-                            className={`rounded-full border px-3 py-1 text-xs ${
-                              active
-                                ? "border-[#0f2744]/40 bg-[#0f2744]/10 text-[#0f2744]"
-                                : "border-[#0f2744]/20 text-[#0f2744] hover:bg-[#0f2744]/5"
-                            }`}
-                          >
-                            {t}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-[#0f2744]">
-                      Time limit (minutes)
-                    </label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      pattern="[0-9]*"
-                      value={String(config.timeLimitMinutes ?? 0)}
-                      onChange={(e) => {
-                        const digits = e.target.value.replace(/[^0-9]/g, "");
-                        const n = Math.max(
-                          0,
-                          Math.min(240, Number(digits) || 0)
-                        );
-                        setConfig((cfg) => ({ ...cfg, timeLimitMinutes: n }));
-                      }}
-                      className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0f2744]/40 focus:border-[#0f2744]"
-                    />
-                  </div>
+            {/* Types + Time limit (moved out of Advanced) */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <div className="mb-2 text-sm font-medium text-[#0f2744]">
+                  Types
                 </div>
-              )}
+                <div className="flex flex-wrap gap-2">
+                  {(["MCQ"] as const).map((t) => {
+                    const active = config.allowedTypes.includes(t);
+                    return (
+                      <button
+                        key={t}
+                        onClick={() =>
+                          setConfig((cfg) => ({
+                            ...cfg,
+                            allowedTypes: active
+                              ? cfg.allowedTypes.filter((x) => x !== t)
+                              : [...cfg.allowedTypes, t],
+                          }))
+                        }
+                        className={`rounded-full border px-3 py-1 text-xs ${
+                          active
+                            ? "border-[#0f2744]/40 bg-[#0f2744]/10 text-[#0f2744]"
+                            : "border-[#0f2744]/20 text-[#0f2744] hover:bg-[#0f2744]/5"
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#0f2744]">
+                  Time limit (minutes)
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={String(config.timeLimitMinutes ?? 0)}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/[^0-9]/g, "");
+                    const n = Math.max(0, Math.min(240, Number(digits) || 0));
+                    setConfig((cfg) => ({ ...cfg, timeLimitMinutes: n }));
+                  }}
+                  className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0f2744]/40 focus:border-[#0f2744]"
+                />
+              </div>
             </div>
 
             <div className="flex items-center justify-between">
@@ -715,6 +627,7 @@ export default function AssignmentsPage() {
           </div>
         )}
 
+        {/* Step 3: Schedule & Review */}
         {step === 3 && (
           <div className="space-y-6">
             <div className="grid gap-4 sm:grid-cols-2">
@@ -756,10 +669,9 @@ export default function AssignmentsPage() {
               </div>
             </div>
 
-            {/* Review */}
             <div className="rounded-lg border border-gray-200 p-4">
               <div className="text-sm font-medium text-[#0f2744]">Review</div>
-              <ul className="mt-2 text-sm text-gray-700 space-y-1">
+              <ul className="mt-2 space-y-1 text-sm text-gray-700">
                 <li>• Candidates: {selectedCandidateIds.length}</li>
                 <li>• Topics: {config.topics.length || "All"}</li>
                 <li>
@@ -767,7 +679,6 @@ export default function AssignmentsPage() {
                   {config.adaptive ? "Yes" : "No"}, Randomize:{" "}
                   {config.randomizeOrder ? "Yes" : "No"}
                 </li>
-                <li>• Difficulties: {config.allowedDifficulties.join(", ")}</li>
                 <li>• Types: {config.allowedTypes.join(", ")}</li>
                 <li>
                   • Time limit:{" "}
@@ -797,8 +708,8 @@ export default function AssignmentsPage() {
               </button>
               <button
                 onClick={createAssignment}
-                className="rounded-md bg-[#ff7a59] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-60"
                 disabled={selectedCandidateIds.length === 0}
+                className="rounded-md bg-[#ff7a59] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-60"
               >
                 Create assignment
               </button>
@@ -807,267 +718,136 @@ export default function AssignmentsPage() {
         )}
       </div>
 
-      {/* Existing assignments */}
+      {/* Existing assignments (only open/unfinished) */}
       <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <h3 className="font-medium text-[#0f2744]">Existing assignments</h3>
-          <div className="text-xs text-gray-600">{list.length} total</div>
+          <div className="text-xs text-gray-600">
+            {openAssignments.length} open
+          </div>
         </div>
 
         {viewMode === "simple" ? (
           <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {list.length === 0 && (
-              <div className="col-span-full rounded-lg border border-dashed border-gray-300 bg-white p-8 text-center text-gray-500">
+            {openAssignments.length === 0 && (
+              <div className="col-span-full rounded-lg border border-dashed p-8 text-center text-sm text-gray-500">
                 No assignments yet
               </div>
             )}
-            {list
-              .slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize)
-              .map((a) => {
-                const st = computeStatus(a.schedule);
-                const window = [
-                  a.schedule.startAt
-                    ? new Date(a.schedule.startAt).toLocaleDateString()
-                    : "—",
-                  a.schedule.dueAt
-                    ? new Date(a.schedule.dueAt).toLocaleDateString()
-                    : "—",
-                ].join(" → ");
-                return (
-                  <div
-                    key={a.id}
-                    className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-200"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="text-xs text-gray-600">
-                        {new Date(a.createdAt).toLocaleDateString()}
-                      </div>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
-                          st === "active"
-                            ? "bg-emerald-50 text-emerald-700"
-                            : st === "scheduled"
-                            ? "bg-amber-50 text-amber-700"
-                            : "bg-rose-50 text-rose-700"
-                        }`}
-                      >
-                        {st}
-                      </span>
+            {openAssignments.map((a: AnyRow) => {
+              const id = toSessionId(a)!;
+              const createdAt =
+                a.created_at ??
+                a.createdAt ??
+                a.session?.created_at ??
+                a.started_at ??
+                null;
+              const candidate =
+                a.candidate_name ??
+                a.candidate ??
+                a.user_name ??
+                a.user?.name ??
+                "";
+              return (
+                <div key={id} className="rounded-lg border p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium text-[#0f2744]">
+                      Session #{id}
                     </div>
-                    <div className="mt-3 text-xs text-gray-700 space-y-1">
-                      <div>
-                        Candidates:{" "}
-                        <span className="font-medium text-slate-900">
-                          {a.candidateIds.length}
-                        </span>{" "}
-                        • Questions:{" "}
-                        <span className="font-medium text-slate-900">
-                          {a.questionIds.length}
-                        </span>
-                      </div>
-                      <div title={window}>
-                        Window:{" "}
-                        <span className="font-medium text-slate-900">
-                          {window}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="mt-4 flex items-center gap-2">
-                      <Link
-                        to={`/app/exam?assignmentId=${a.id}`}
-                        className="inline-flex items-center gap-1 rounded-md bg-[#ff7a59] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
-                      >
-                        <Play className="h-3.5 w-3.5" /> Test
-                      </Link>
-                      <button
-                        onClick={() => {
-                          const copy: Assignment = {
-                            ...a,
-                            id: crypto.randomUUID(),
-                            createdAt: new Date().toISOString(),
-                          };
-                          const updated = [copy, ...list];
-                          setList(updated);
-                        }}
-                        className="inline-flex items-center gap-1 rounded-xl border border-slate-300/70 bg-gradient-to-r from-slate-100 to-slate-200 px-3 py-1.5 text-xs font-medium text-slate-800 shadow-sm hover:from-slate-200 hover:to-slate-300 hover:shadow-md"
-                      >
-                        <Copy className="h-3.5 w-3.5" /> Duplicate
-                      </button>
-                      <button
-                        onClick={() => {
-                          const updated = list.filter((x) => x.id !== a.id);
-                          setList(updated);
-                          // if you add a BE delete: await deleteAssignmentSvc(a.id)
-                        }}
-                        className="inline-flex items-center gap-1 rounded-md border border-rose-200 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-50"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" /> Delete
-                      </button>
+                    <div className="text-xs text-gray-500">
+                      {createdAt ? new Date(createdAt).toLocaleString() : "—"}
                     </div>
                   </div>
-                );
-              })}
+                  <div className="mt-2 text-xs text-gray-600">
+                    Candidate:{" "}
+                    <span className="font-medium">{candidate || "—"}</span>
+                  </div>
+                  <div className="mt-3 flex items-center justify-end gap-2">
+                    <Link
+                      to={`/app/sessions/${toSessionId(a)!}`}
+                      className="inline-flex items-center gap-1 rounded-md bg-[#ff7a59] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      Open
+                    </Link>
+                    <button
+                      onClick={() => removeAssignment(id)}
+                      className="inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         ) : (
-          <div className="mt-4 overflow-auto">
-            <table className="min-w-full text-sm">
+          <div className="mt-4 overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
               <thead>
-                <tr className="text-left text-gray-700">
-                  <th className="px-3 py-2 font-medium">Candidates</th>
-                  <th className="px-3 py-2 font-medium">Topics</th>
-                  <th className="px-3 py-2 font-medium">Questions</th>
-                  <th className="px-3 py-2 font-medium">Adaptive</th>
-                  <th className="px-3 py-2 font-medium">Time limit</th>
-                  <th className="px-3 py-2 font-medium">Window</th>
-                  <th className="px-3 py-2 font-medium">Status</th>
-                  <th className="px-3 py-2 font-medium">Actions</th>
+                <tr className="border-b bg-gray-50 text-xs text-gray-600">
+                  <th className="px-3 py-2">Session</th>
+                  <th className="px-3 py-2">Candidate</th>
+                  <th className="px-3 py-2">Created</th>
+                  <th className="px-3 py-2"></th>
                 </tr>
               </thead>
               <tbody>
-                {list.length === 0 && (
+                {openAssignments.length === 0 && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={4}
                       className="px-3 py-6 text-center text-gray-500"
                     >
                       No assignments yet
                     </td>
                   </tr>
                 )}
-                {list
-                  .slice(
-                    (page - 1) * pageSize,
-                    (page - 1) * pageSize + pageSize
-                  )
-                  .map((a, idx) => {
-                    const st = computeStatus(a.schedule);
-                    const window = [
-                      a.schedule.startAt
-                        ? new Date(a.schedule.startAt).toLocaleString()
-                        : "—",
-                      a.schedule.dueAt
-                        ? new Date(a.schedule.dueAt).toLocaleString()
-                        : "—",
-                    ].join(" → ");
-                    const zebra = idx % 2 === 0 ? "bg-white" : "bg-neutral-50";
-                    const pad = density === "compact" ? "py-1.5" : "py-2";
-                    return (
-                      <tr
-                        key={a.id}
-                        className={`${zebra} hover:bg-[#0f2744]/5`}
-                      >
-                        <td className={`px-3 ${pad} text-right`}>
-                          {a.candidateIds.length}
-                        </td>
-                        <td className={`px-3 ${pad} text-right`}>
-                          {a.config.topics.length || "All"}
-                        </td>
-                        <td className={`px-3 ${pad} text-right`}>
-                          {a.questionIds.length}
-                        </td>
-                        <td className={`px-3 ${pad}`}>
-                          {a.config.adaptive ? "Yes" : "No"}
-                        </td>
-                        <td className={`px-3 ${pad} text-right`}>
-                          {a.config.timeLimitMinutes
-                            ? `${a.config.timeLimitMinutes}m`
-                            : "—"}
-                        </td>
-                        <td className={`px-3 ${pad}`} title={window}>
-                          <div className="max-w-[220px] truncate">{window}</div>
-                        </td>
-                        <td className="px-3 py-2">
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                              st === "active"
-                                ? "bg-emerald-50 text-emerald-700"
-                                : st === "scheduled"
-                                ? "bg-amber-50 text-amber-700"
-                                : "bg-rose-50 text-rose-700"
-                            }`}
+                {openAssignments.map((a: AnyRow, i: number) => {
+                  const id = toSessionId(a)!;
+                  const createdAt =
+                    a.created_at ??
+                    a.createdAt ??
+                    a.session?.created_at ??
+                    a.started_at ??
+                    null;
+                  const candidate =
+                    a.candidate_name ??
+                    a.candidate ??
+                    a.user_name ??
+                    a.user?.name ??
+                    "";
+                  return (
+                    <tr key={id} className={i % 2 ? "bg-white" : "bg-white"}>
+                      <td className="px-3 py-2">#{id}</td>
+                      <td className="px-3 py-2">{candidate || "—"}</td>
+                      <td className="px-3 py-2">
+                        {createdAt ? new Date(createdAt).toLocaleString() : "—"}
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex justify-end gap-2">
+                          <Link
+                            to={`/app/sessions/${toSessionId(a)!}`}
+                            className="inline-flex items-center gap-1 rounded-md bg-[#ff7a59] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
                           >
-                            {st}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2">
-                          <div className="flex items-center gap-2">
-                            <Link
-                              to={`/app/exam?assignmentId=${a.id}`}
-                              className="inline-flex items-center gap-1 rounded-md bg-[#ff7a59] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110 cursor-pointer"
-                            >
-                              <Play className="h-3.5 w-3.5" /> Test
-                            </Link>
-                            <button
-                              onClick={() => {
-                                const copy: Assignment = {
-                                  ...a,
-                                  id: crypto.randomUUID(),
-                                  createdAt: new Date().toISOString(),
-                                };
-                                const updated = [copy, ...list];
-                                setList(updated);
-                              }}
-                              className="inline-flex items-center gap-1 rounded-md border border-[#0f2744]/20 px-3 py-1.5 text-xs text-[#0f2744] hover:bg-[#0f2744]/5 cursor-pointer"
-                            >
-                              <Copy className="h-3.5 w-3.5" /> Duplicate
-                            </button>
-                            <button
-                              onClick={() => {
-                                const updated = list.filter(
-                                  (x) => x.id !== a.id
-                                );
-                                setList(updated);
-                                // if you add a BE delete: await deleteAssignmentSvc(a.id)
-                              }}
-                              className="inline-flex items-center gap-1 rounded-md border border-rose-200 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-50 cursor-pointer"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" /> Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                            <Play className="h-3.5 w-3.5" />
+                            Open
+                          </Link>
+                          <button
+                            onClick={() => removeAssignment(id)}
+                            className="inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
-          </div>
-        )}
-        {/* Pagination */}
-        {list.length > 0 && (
-          <div className="mt-3 flex items-center justify-between text-xs text-gray-600">
-            <div>
-              Showing {Math.min((page - 1) * pageSize + 1, list.length)}–
-              {Math.min(page * pageSize, list.length)} of {list.length}
-            </div>
-            <div className="inline-flex rounded-md border border-gray-200 overflow-hidden">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1}
-                className={`px-3 py-1 ${
-                  page === 1
-                    ? "opacity-50 cursor-not-allowed"
-                    : "hover:bg-[#0f2744]/5"
-                }`}
-              >
-                Prev
-              </button>
-              <div className="px-3 py-1 border-l border-r border-gray-200">
-                Page {page}
-              </div>
-              <button
-                onClick={() =>
-                  setPage((p) => (p * pageSize < list.length ? p + 1 : p))
-                }
-                disabled={page * pageSize >= list.length}
-                className={`px-3 py-1 ${
-                  page * pageSize >= list.length
-                    ? "opacity-50 cursor-not-allowed"
-                    : "hover:bg-[#0f2744]/5"
-                }`}
-              >
-                Next
-              </button>
-            </div>
           </div>
         )}
       </div>
