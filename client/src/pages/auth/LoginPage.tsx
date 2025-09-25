@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "../../lib/firebase";
 import { request } from "../../lib/api";
@@ -37,6 +37,13 @@ export default function LoginPage() {
       className="min-h-screen w-full flex items-center justify-center p-4
                     bg-gradient-to-r from-[#0B1E2E] via-[#2B3A49] to-[#ff7a59]"
     >
+      {/* Home button (top-right) */}
+      <Link
+        to="/"
+        className="fixed top-4 right-4 inline-flex items-center px-3 py-1.5 rounded-md text-sm font-medium text-white bg-white/10 border border-white/20 backdrop-blur hover:bg-white/20 transition"
+      >
+        Home
+      </Link>
       {/* Glassy card with subtle border and shadow, centered */}
       <div className="w-full max-w-md">
         <div className="rounded-xl border border-white/15 bg-white/10 backdrop-blur-md shadow-[0_10px_30px_rgba(0,0,0,0.25)]">

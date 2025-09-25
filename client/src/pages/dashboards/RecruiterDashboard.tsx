@@ -205,18 +205,7 @@ export default function RecruiterDashboard() {
           </li>
         )}
 
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between">
-            <h3 className="font-medium text-[#0f2744]">Templates</h3>
-            <Settings2 className="h-4 w-4 text-[#0f2744]" />
-          </div>
-          <p className="mt-2 text-sm text-gray-600">
-            Save and reuse common assignment configurations.
-          </p>
-          <button className="mt-4 inline-flex items-center gap-2 rounded-md border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50">
-            Coming soon
-          </button>
-        </div>
+        {/* Templates card removed as requested */}
 
         <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">

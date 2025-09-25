@@ -42,7 +42,7 @@ export default function DashboardLayout() {
 
   // Allowed labels by role (edit as your policy requires)
   const allowedByRole: Record<Role, string[]> = {
-    admin: ['Dashboard', 'Question Bank', 'Create Questions', 'Approvals', 'Assignments', 'Analytics', 'User Management', 'Results'],
+    admin: ['Dashboard','User Management', 'Analytics'],
     editor: ['Dashboard', 'Question Bank', 'Create Questions', 'Approvals'],
     recruiter: ['Dashboard', 'Assignments', 'Analytics'],
     candidate: ['Dashboard', 'Results'],

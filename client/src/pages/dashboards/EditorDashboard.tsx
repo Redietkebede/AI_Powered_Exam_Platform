@@ -122,11 +122,6 @@ export default function EditorDashboard() {
             tone: "bg-amber-50 text-amber-700 border-amber-200",
           },
           {
-            label: "Drafts",
-            value: counts.draft,
-            tone: "bg-gray-50 text-gray-700 border-gray-200",
-          },
-          {
             label: "Approved",
             value: counts.approved,
             tone: "bg-emerald-50 text-emerald-700 border-emerald-200",
