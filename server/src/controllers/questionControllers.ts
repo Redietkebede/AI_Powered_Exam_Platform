@@ -3,26 +3,56 @@ import { RequestHandler } from "express";
 import { generateQuestions } from "../services/examStructure";
 import { insertQuestion, getQuestions } from "../middleware/qustions";
 import pool from "../config/db";
-const ReqSchema = z
+
+type Level = 1 | 2 | 3 | 4 | 5;
+
+const Extras = z.object({
+  // adaptive knobs (editor UI can hide these; good defaults)
+  stageSize: z.coerce.number().int().min(1).max(50).default(10),
+  bufferFactor: z.coerce.number().int().min(1).max(10).default(4),
+  levelMixPerStage: z
+    .object({
+      1: z.coerce.number().int().min(0).optional(),
+      2: z.coerce.number().int().min(0).optional(),
+      3: z.coerce.number().int().min(0).optional(),
+      4: z.coerce.number().int().min(0).optional(),
+      5: z.coerce.number().int().min(0).optional(),
+    })
+    .optional(),
+});
+
+// Branch A: current shape { topic, difficulty, count } + extras
+const BranchA = z
   .object({
     topic: z.string().min(2, "topic is required"),
     difficulty: z.coerce.number().int().min(1).max(5).default(3),
     count: z.coerce.number().int().min(1).max(50).default(5),
   })
-  .or(
-    // backwards-compat: allow { topic, difficulty, numberOfQuestions }
-    z
-      .object({
-        topic: z.string().min(2),
-        difficulty: z.coerce.number().int().min(1).max(5).default(3),
-        numberOfQuestions: z.coerce.number().int().min(1).max(50).default(5),
-      })
-      .transform((v) => ({
-        topic: v.topic,
-        difficulty: v.difficulty,
-        count: v.numberOfQuestions,
-      }))
-  );
+  .merge(Extras);
+
+// Branch B (back-compat): { topic, difficulty, numberOfQuestions } + extras
+// → normalized to { topic, difficulty, count, ...extras }
+const BranchB = z
+  .object({
+    topic: z.string().min(2),
+    difficulty: z.coerce.number().int().min(1).max(5).default(3),
+    numberOfQuestions: z.coerce.number().int().min(1).max(50).default(5),
+  })
+  .merge(Extras)
+  .transform((v) => ({
+    topic: v.topic,
+    difficulty: v.difficulty,
+    count: v.numberOfQuestions,
+    stageSize: v.stageSize,
+    bufferFactor: v.bufferFactor,
+    levelMixPerStage: v.levelMixPerStage,
+  }));
+
+// Final schema: accepts both, returns the normalized shape
+export const ReqSchema = BranchA.or(BranchB);
+
+// In your handler:
+// const { topic, difficulty, count, stageSize, bufferFactor, levelMixPerStage } = ReqSchema.parse(req.body);
 
 const DeleteSchema = z.object({
   ids: z.array(z.coerce.number().int().positive()).min(1),
@@ -213,79 +243,384 @@ export const createQuestionManual: RequestHandler = async (req, res, next) => {
   }
 };
 
+// same defaults we use elsewhere: 10-per stage, 1/2/4/2/1 mix, ×4 buffer
+// at top of the file (or near your other types
+
+/** keep your existing version; unchanged except for clarity */
+// Keep your existing imports/types (ReqSchema, Level, pool, insertQuestion, generateQuestions, etc.)
+
+/** Existing (unchanged): large buffered requirement calculator */
+function computeLevelRequirements(params: {
+  examQuestions: number;
+  stageSize?: number;
+  bufferFactor?: number;
+  levelMixPerStage?: Partial<Record<Level, number>>;
+}) {
+  const stageSize = params.stageSize ?? 10;
+  const buf = params.bufferFactor ?? 4;
+  const defMix: Record<Level, number> = { 1: 1, 2: 2, 3: 4, 4: 2, 5: 1 };
+
+  const mix: Record<Level, number> = {
+    1: params.levelMixPerStage?.[1] ?? defMix[1],
+    2: params.levelMixPerStage?.[2] ?? defMix[2],
+    3: params.levelMixPerStage?.[3] ?? defMix[3],
+    4: params.levelMixPerStage?.[4] ?? defMix[4],
+    5: params.levelMixPerStage?.[5] ?? defMix[5],
+  };
+
+  const sum = mix[1] + mix[2] + mix[3] + mix[4] + mix[5] || stageSize;
+
+  const normMix: Record<Level, number> =
+    sum === stageSize
+      ? mix
+      : ((): Record<Level, number> => {
+          const scaled = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } as Record<
+            Level,
+            number
+          >;
+          (Object.keys(mix) as unknown as Level[]).forEach((L) => {
+            scaled[L] = Math.max(0, Math.round((mix[L] * stageSize) / sum));
+          });
+          if (Object.values(scaled).every((v) => v === 0))
+            scaled[3] = stageSize;
+          return scaled;
+        })();
+
+  const stages = Math.max(1, Math.ceil(params.examQuestions / stageSize));
+
+  const expectedDrawPerLevel = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } as Record<
+    Level,
+    number
+  >;
+  (Object.keys(normMix) as unknown as Level[]).forEach((L) => {
+    expectedDrawPerLevel[L] = (normMix[L] ?? 0) * stages;
+  });
+
+  const requiredPerLevel = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } as Record<
+    Level,
+    number
+  >;
+  (Object.keys(expectedDrawPerLevel) as unknown as Level[]).forEach((L) => {
+    requiredPerLevel[L] = Math.max(1, Math.ceil(expectedDrawPerLevel[L] * buf));
+  });
+
+  return {
+    stages,
+    stageSize,
+    bufferFactor: buf,
+    levelMixPerStage: normMix,
+    expectedDrawPerLevel,
+    requiredPerLevel,
+    mode: "buffered" as const,
+  };
+}
+
+/** NEW: compact pool (~ poolMultiplier × count) with 1:2:4:2:1 mix by default */
+function computeCompactPool(params: {
+  examQuestions: number;
+  poolMultiplier?: number; // default 3×
+  levelMix?: Partial<Record<Level, number>>; // optional override
+}) {
+  const N = Math.max(1, Math.floor(params.examQuestions));
+  const k = Math.max(1, Math.floor(params.poolMultiplier ?? 3)); // default 3
+  const base: Record<Level, number> = {
+    1: params.levelMix?.[1] ?? 1,
+    2: params.levelMix?.[2] ?? 2,
+    3: params.levelMix?.[3] ?? 4,
+    4: params.levelMix?.[4] ?? 2,
+    5: params.levelMix?.[5] ?? 1,
+  };
+  const baseSum = base[1] + base[2] + base[3] + base[4] + base[5];
+  const target = N * k;
+
+  // proportional rounding
+  const wanted: Record<Level, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  let allocated = 0;
+  (Object.keys(base) as unknown as Level[]).forEach((L) => {
+    const q = Math.round((base[L] / baseSum) * target);
+    wanted[L] = q;
+    allocated += q;
+  });
+
+  // nudge so sum === target
+  const order: Level[] = [3, 2, 4, 1, 5];
+  let diff = target - allocated;
+  let i = 0;
+  while (diff !== 0) {
+    const L = order[i % order.length];
+    wanted[L] = Math.max(1, wanted[L] + (diff > 0 ? 1 : -1));
+    diff += diff > 0 ? -1 : 1;
+    i++;
+  }
+
+  return {
+    requiredPerLevel: wanted,
+    expectedDrawPerLevel: wanted, // for reporting parity
+    stageSize: undefined,
+    bufferFactor: undefined,
+    levelMixPerStage: undefined,
+    mode: "compact" as const,
+    poolMultiplier: k,
+  };
+}
+
+const norm = (s: unknown) =>
+  String(s ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** ─────────────────────────────────────────────────────────────────────
+ *  POST /api/questions/generate
+ *  Body:
+ *    - topic, count
+ *    - OPTIONAL compact: poolMultiplier        ← small pool (~k×count)
+ *    - OPTIONAL buffered: stageSize, bufferFactor, levelMixPerStage
+ *  Generates only the **deficit** per level (status = 'draft').
+ *  ───────────────────────────────────────────────────────────────────── */
+
+
 export const createQuestions: RequestHandler = async (req, res) => {
   try {
-    const { topic, difficulty, count } = ReqSchema.parse(req.body);
+    // Parse with your existing Zod schema (leave as-is)
+    const parsed = ReqSchema.parse(req.body) as any;
 
-    const payload = await generateQuestions(
-      topic,
-      difficulty as 1 | 2 | 3 | 4 | 5,
-      count
-    );
+    const topic: string = String(parsed.topic ?? "");
+    const count: number = Math.max(1, Number(parsed.count ?? 1));
+    const stageSizeIn: number | undefined = Number.isFinite(parsed.stageSize)
+      ? Number(parsed.stageSize)
+      : undefined;
+    const bufferFactorIn: number | undefined = Number.isFinite(
+      parsed.bufferFactor
+    )
+      ? Number(parsed.bufferFactor)
+      : undefined;
+    const levelMixPerStageIn: Partial<Record<Level, number>> | undefined =
+      parsed.levelMixPerStage;
+    const poolMultiplierIn: number | undefined =
+      parsed.poolMultiplier != null &&
+      Number.isFinite(Number(parsed.poolMultiplier))
+        ? Number(parsed.poolMultiplier)
+        : undefined;
 
-    // WRITE model: match exactly what insertMany expects
-    type InsertQuestionRow = {
-      topic: string;
-      question_text: string;
-      options: string[]; // stored/serialized by DB layer
-      correct_answer: number; // 0..3
-      difficulty: number; // 1..5
-      tags?: string[]; // optional
-      explanation?: string[] | null; // <-- match DB: array or null
+    // ────────────────────────────────────────────────────────────────────
+    // Helper: build a compact plan when poolMultiplier is present.
+    //   - Uses the same 1..5 difficulty weights as your stage mix.
+    //   - Produces { expectedDrawPerLevel, requiredPerLevel } like your
+    //     buffered planner so the rest of the code remains unchanged.
+    // ────────────────────────────────────────────────────────────────────
+    const planCompact = (params: {
+      examQuestions: number;
+      poolMultiplier: number; // e.g. 2 → ~2× exam size total pool
+      levelMix?: Partial<Record<Level, number>>;
+    }) => {
+      const defMix: Record<Level, number> = { 1: 1, 2: 2, 3: 4, 4: 2, 5: 1 };
+      const mix: Record<Level, number> = {
+        1: params.levelMix?.[1] ?? defMix[1],
+        2: params.levelMix?.[2] ?? defMix[2],
+        3: params.levelMix?.[3] ?? defMix[3],
+        4: params.levelMix?.[4] ?? defMix[4],
+        5: params.levelMix?.[5] ?? defMix[5],
+      };
+      const W = Math.max(1, mix[1] + mix[2] + mix[3] + mix[4] + mix[5]);
+
+      const totalPool = Math.max(
+        params.examQuestions,
+        Math.ceil(params.examQuestions * params.poolMultiplier)
+      );
+
+      const expectedDrawPerLevel: Record<Level, number> = {
+        1: 0,
+        2: 0,
+        3: 0,
+        4: 0,
+        5: 0,
+      };
+      const requiredPerLevel: Record<Level, number> = {
+        1: 0,
+        2: 0,
+        3: 0,
+        4: 0,
+        5: 0,
+      };
+
+      (Object.keys(mix) as unknown as Level[]).forEach((L) => {
+        expectedDrawPerLevel[L] = Math.max(
+          0,
+          Math.ceil((params.examQuestions * (mix[L] ?? 0)) / W)
+        );
+        requiredPerLevel[L] = Math.max(
+          1,
+          Math.ceil((totalPool * (mix[L] ?? 0)) / W)
+        );
+      });
+
+      return {
+        mode: "compact" as const,
+        poolMultiplier: params.poolMultiplier,
+        expectedDrawPerLevel,
+        requiredPerLevel,
+      };
     };
 
-    const notNull = <T>(x: T | null | undefined): x is T => x != null;
-    const norm = (s: unknown) =>
-      String(s ?? "")
-        .toLowerCase()
-        .replace(/\s+/g, " ")
-        .trim();
+    // ────────────────────────────────────────────────────────────────────
+    // Choose planning mode:
+    //   * compact (small pool) if poolMultiplier is provided
+    //   * buffered (your original) otherwise, but with safe defaults
+    //     so we don’t blow up tiny requests into 40+ questions.
+    // ────────────────────────────────────────────────────────────────────
+    const reqs =
+      Number.isFinite(poolMultiplierIn) && (poolMultiplierIn as number) > 0
+        ? planCompact({
+            examQuestions: count,
+            poolMultiplier: Math.max(
+              1,
+              Math.min(6, Math.floor(poolMultiplierIn as number))
+            ), // cap sensibly
+            levelMix: levelMixPerStageIn,
+          })
+        : (() => {
+            // Keep your buffered logic, but pick compact defaults if caller didn’t send any.
+            const wantedStage =
+              typeof stageSizeIn === "number" && stageSizeIn > 0
+                ? Math.floor(stageSizeIn)
+                : count;
 
-    const rows: (InsertQuestionRow | null)[] = (payload?.questions ?? []).map(
-      (q: any) => {
-        // options as string[]
+            // never let stage size exceed the number of questions requested
+            const effectiveStageSize = Math.max(
+              3,
+              Math.min(10, Math.min(wantedStage, count))
+            );
+
+            const effectiveBuffer =
+              typeof bufferFactorIn === "number" && bufferFactorIn > 0
+                ? Math.max(1, Math.min(6, Math.floor(bufferFactorIn)))
+                : 2; // smaller default buffer than 4
+
+            const r = computeLevelRequirements({
+              examQuestions: count,
+              stageSize: effectiveStageSize,
+              bufferFactor: effectiveBuffer,
+              levelMixPerStage: levelMixPerStageIn,
+            });
+
+            // annotate (non-breaking extra fields for your response)
+            return {
+              ...r,
+              mode: "buffered" as const,
+              stageSize: effectiveStageSize,
+              bufferFactor: effectiveBuffer,
+              levelMixPerStage: r.levelMixPerStage,
+            };
+          })();
+
+    // ────────────────────────────────────────────────────────────────────
+    // What we already have (draft + published/approved)
+    // ────────────────────────────────────────────────────────────────────
+    const existing = await pool.query<{
+      difficulty: number;
+      available: number;
+    }>(
+      `
+      SELECT difficulty::int AS difficulty, COUNT(*)::int AS available
+      FROM questions
+      WHERE LOWER(TRIM(topic)) = LOWER($1)
+        AND LOWER(TRIM(COALESCE(status,''))) IN ('draft','published','approved')
+      GROUP BY difficulty
+      `,
+      [topic]
+    );
+
+    const have: Record<Level, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    existing.rows.forEach((r) => {
+      const L = Math.max(1, Math.min(5, Number(r.difficulty))) as Level;
+      have[L] = Number(r.available ?? 0);
+    });
+
+    // ────────────────────────────────────────────────────────────────────
+    // Deficit per level = required – have
+    // ────────────────────────────────────────────────────────────────────
+    const toCreate: Record<Level, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    (Object.keys(reqs.requiredPerLevel) as unknown as Level[]).forEach((L) => {
+      toCreate[L] = Math.max(
+        0,
+        (reqs.requiredPerLevel[L] ?? 0) - (have[L] ?? 0)
+      );
+    });
+
+    // trackers (for response)
+    const generatedPerLevel: Record<
+      Level,
+      { requested: number; generated: number; inserted: number }
+    > = {
+      1: { requested: toCreate[1], generated: 0, inserted: 0 },
+      2: { requested: toCreate[2], generated: 0, inserted: 0 },
+      3: { requested: toCreate[3], generated: 0, inserted: 0 },
+      4: { requested: toCreate[4], generated: 0, inserted: 0 },
+      5: { requested: toCreate[5], generated: 0, inserted: 0 },
+    };
+
+    let totalInserted = 0;
+
+    // ────────────────────────────────────────────────────────────────────
+    // Generate only the deficit per level, insert as draft
+    // ────────────────────────────────────────────────────────────────────
+    for (const L of [1, 2, 3, 4, 5] as const) {
+      const need = toCreate[L];
+      if (need <= 0) continue;
+
+      const payload = await generateQuestions(topic, L, need);
+      const items = (payload?.questions ?? []) as Array<{
+        question_text?: string;
+        question?: string;
+        options?: string[] | unknown[];
+        correct_answer?: number | string;
+        answerIndex?: number;
+        answer?: string;
+        answerText?: string;
+        explanation?: string | string[] | null;
+        tags?: string[] | string;
+      }>;
+
+      generatedPerLevel[L].generated = items.length;
+
+      for (const q of items) {
+        if (generatedPerLevel[L].inserted >= need) break;
+
+        // options → exactly 4 strings
         const opts: string[] = Array.isArray(q?.options)
-          ? (q.options as unknown[]).slice(0, 4).map((s: any) => String(s))
+          ? (q.options as unknown[]).slice(0, 4).map(String)
           : [];
+        if (opts.length !== 4) continue;
 
-        // must be exactly 4 options
-        if (opts.length !== 4) {
-          console.warn("✗ Skipping (needs 4 options):", q?.question_text);
-          return null;
-        }
-
-        // resolve correct index (prefer normalized numeric; then 0-based/1-based; then text match)
+        // resolve correct index 0..3
         let idx: number =
-          typeof q?.correct_answer === "number" ? q.correct_answer : -1;
+          typeof q?.correct_answer === "number"
+            ? q.correct_answer
+            : Number.isFinite(Number(q?.correct_answer))
+            ? Number(q?.correct_answer)
+            : -1;
 
-        if (idx < 0 || idx >= opts.length) {
+        if (idx < 0 || idx >= 4) {
           const ai = Number(q?.answerIndex);
-          if (!Number.isNaN(ai) && ai >= 0 && ai < opts.length) idx = ai;
-          else if (!Number.isNaN(ai) && ai >= 1 && ai <= opts.length)
-            idx = ai - 1;
+          if (!Number.isNaN(ai) && ai >= 0 && ai < 4) idx = ai;
+          else if (!Number.isNaN(ai) && ai >= 1 && ai <= 4) idx = ai - 1;
         }
-
-        if (idx < 0 || idx >= opts.length) {
+        if (idx < 0 || idx >= 4) {
           const ansText = norm(q?.correct_answer ?? q?.answer ?? q?.answerText);
-          if (ansText) {
-            idx = opts.findIndex((o: string) => norm(o) === ansText);
-          }
+          if (ansText) idx = opts.findIndex((o) => norm(o) === ansText);
         }
+        if (idx < 0 || idx >= 4) continue;
 
-        if (idx < 0 || idx >= opts.length) {
-          console.warn("✗ Could not resolve correct_answer:", q?.question_text);
-          return null;
-        }
-
-        // explanation must be string[] | null for insertMany
-        const explanation: string[] | null = Array.isArray(q?.explanation)
+        // explanation → string[] | null
+        const explanationArr: string[] | null = Array.isArray(q?.explanation)
           ? (q.explanation as unknown[]).map((s: any) => String(s))
           : typeof q?.explanation === "string" && q.explanation.trim() !== ""
-          ? [q.explanation]
+          ? [q.explanation.trim()]
           : null;
 
-        // tags -> string[]
-        const tags: string[] = Array.isArray(q?.tags)
+        // tags → string[]
+        const tagsArr: string[] = Array.isArray(q?.tags)
           ? (q.tags as unknown[]).map((t: any) => String(t))
           : typeof q?.tags === "string"
           ? (() => {
@@ -298,56 +633,114 @@ export const createQuestions: RequestHandler = async (req, res) => {
             })()
           : [];
 
-        return {
-          topic: String(payload?.topic ?? topic),
+        await insertQuestion({
+          topic: String(topic),
+          difficulty: L,
           question_text: String(q?.question_text ?? q?.question ?? "").trim(),
           options: opts,
           correct_answer: idx,
-          difficulty: Number(payload?.difficulty ?? difficulty) || 3,
-          tags,
-          explanation, // <-- rename to `explanation` here if your DB expects that
-        };
+          explanation: explanationArr,
+          tags: tagsArr,
+          status: "draft", // send to Approvals
+          type: "MCQ",
+        });
+
+        generatedPerLevel[L].inserted += 1;
+        totalInserted += 1;
       }
-    );
-
-    const cleanRows: InsertQuestionRow[] = rows.filter(notNull);
-
-    if (cleanRows.length === 0) {
-      return res.status(422).json({ error: "No valid questions to insert." });
     }
 
-    await insertMany(cleanRows);
+    if (totalInserted === 0) {
+      return res.status(422).json({
+        error: "No valid questions generated",
+        details: {
+          topic,
+          examQuestions: count,
+          requiredPerLevel: reqs.requiredPerLevel,
+        },
+      });
+    }
 
+    // ────────────────────────────────────────────────────────────────────
+    // Response (keeps fields your FE expects; adds harmless context)
+    // ────────────────────────────────────────────────────────────────────
     return res.json({
-      inserted: cleanRows.length,
-      topic: payload?.topic ?? topic,
-      difficulty: payload?.difficulty ?? difficulty,
-      generation_time: payload?.generation_time,
+      inserted: totalInserted,
+      topic,
+      difficulty: 3, // placeholder; mixed levels inserted
+      mode: (reqs as any).mode ?? "buffered",
+      poolMultiplier: (reqs as any).poolMultiplier ?? undefined,
+      examQuestions: count,
+      stageSize: (reqs as any).stageSize ?? undefined,
+      bufferFactor: (reqs as any).bufferFactor ?? undefined,
+      levelMixPerStage: (reqs as any).levelMixPerStage ?? undefined,
+      expectedDrawPerLevel: reqs.expectedDrawPerLevel,
+      requiredPerLevel: reqs.requiredPerLevel,
+      existingPerLevel: have,
+      resultPerLevel: generatedPerLevel, // requested(deficit)/generated/inserted
     });
   } catch (err: any) {
     if (res.headersSent) return;
     const status = Number(err?.status) || 400;
     const details = err?.issues ?? err?.message ?? String(err);
-    console.error("[GEN] failed:", details);
+    // eslint-disable-next-line no-console
+    console.error("[createQuestions] failed:", details);
     return res.status(status).json({ error: "failed to generate", details });
   }
 };
 
 export const listQuestions: RequestHandler = async (req, res) => {
   try {
-    const topic = String(req.query.topic ?? "");
-    const difficulty = Number(req.query.difficulty ?? 3);
-    const limit = Math.min(Number(req.query.limit ?? 20), 100);
-    const offset = Number(req.query.offset ?? 0);
+    // read & sanitize
+    const topicRaw = String(req.query.topic ?? "").trim();
+    const statusRaw = String(req.query.status ?? "")
+      .trim()
+      .toLowerCase(); // e.g. 'draft' | 'published' | 'rejected'
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
 
-    if (!topic) {
+    if (!topicRaw) {
       return res.status(400).json({ error: "Topic is required" });
     }
 
-    const rows = await getQuestions(topic, difficulty, limit, offset);
-    res.json({ total: rows.length, items: rows });
+    // build WHERE: topic (case-insensitive) + optional status
+    const where: string[] = [];
+    const params: any[] = [];
+
+    params.push(topicRaw);
+    where.push(`LOWER(TRIM(q.topic)) = LOWER(TRIM($${params.length}))`);
+
+    if (statusRaw) {
+      params.push(statusRaw);
+      where.push(`LOWER(TRIM(q.status)) = LOWER(TRIM($${params.length}))`);
+    }
+
+    const sql = `
+      SELECT
+        q.id,
+        q.topic,
+        q.question_text,
+        q.options,
+        q.correct_answer,
+        q.difficulty,
+        q.tags,
+        q.explanation,
+        q.status,
+        q.type,
+        q.created_at
+      FROM questions q
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY q.created_at DESC, q.id DESC
+      LIMIT $${params.push(limit)} OFFSET $${params.push(offset)}
+    `;
+
+    const { rows } = await pool.query(sql, params);
+    return res.json({ total: rows.length, items: rows });
   } catch (e: any) {
-    res.status(500).json({ error: e.message ?? "Failed to fetch questions" });
+    console.error("[listQuestions] failed:", e);
+    return res
+      .status(500)
+      .json({ error: e?.message ?? "Failed to fetch questions" });
   }
 };
 
@@ -532,17 +925,22 @@ export async function insertMany(
         INSERT INTO questions
           (topic, question_text, options, correct_answer, difficulty, tags, explanation, status)
         VALUES
-          ($1,    $2,            $3::jsonb, $4,            $5,         $6::text[], $7, 'draft')
+          ($1,    $2,            $3::jsonb, $4,            $5,         $6::text[], $7::text[], 'draft')
         ON CONFLICT (topic, question_text) DO NOTHING
         `,
         [
           q.topic, // $1
           q.question_text, // $2
-          JSON.stringify(q.options), // $3 -> jsonb (no stringify)
+          JSON.stringify(q.options), // $3 -> jsonb
           q.correct_answer, // $4
           q.difficulty, // $5
-          Array.isArray(q.tags) ? q.tags : [], // $6 -> text[]
-          q.explanation ?? null, // $7 -> explanation
+          Array.isArray(q.tags) ? q.tags.map(String) : [], // $6 -> text[]
+          q.explanation == null
+            ? null
+            : Array.isArray(q.explanation)
+            ? q.explanation.map(String)
+            : [String(q.explanation)], // $7 -> text[] (or null)
+          q.status ?? "draft",
         ]
       );
     }
@@ -629,5 +1027,86 @@ export const deleteQuestionById: RequestHandler = async (req, res) => {
     return res
       .status(500)
       .json({ error: "failed to delete", details: e.message });
+  }
+};
+
+// GET /api/questions/sufficiency?topic=java&examQuestions=10
+export const getTopicSufficiency: RequestHandler = async (req, res) => {
+  try {
+    const topic = String(req.query.topic ?? "")
+      .trim()
+      .toLowerCase();
+    const examQuestions = Math.max(
+      1,
+      Math.min(100, Number(req.query.examQuestions ?? 10))
+    );
+
+    if (!topic) return res.status(400).json({ error: "Missing topic" });
+
+    // count *published/approved* per difficulty for the topic
+    const { rows } = await pool.query<{
+      difficulty: number;
+      available: number;
+    }>(
+      `
+      SELECT difficulty::int, COUNT(*)::int AS available
+      FROM questions
+      WHERE lower(trim(topic)) = $1
+        AND (lower(trim(status)) IN ('published','approved'))
+      GROUP BY difficulty
+      `,
+      [topic]
+    );
+
+    const byLevel: Record<1 | 2 | 3 | 4 | 5, number> = {
+      1: 0,
+      2: 0,
+      3: 0,
+      4: 0,
+      5: 0,
+    };
+    for (const r of rows) {
+      const d = Math.max(1, Math.min(5, Number(r.difficulty)));
+      byLevel[d as 1 | 2 | 3 | 4 | 5] = Number(r.available || 0);
+    }
+
+    // reuse your helper from createQuestions()
+    const reqs = computeLevelRequirements({
+      examQuestions,
+      // keep defaults (stageSize 10, bufferFactor 4, mix 1/2/4/2/1) or
+      // pass custom policy via query if you want
+    });
+
+    // check sufficiency
+    const shortfalls: Array<{
+      level: 1 | 2 | 3 | 4 | 5;
+      need: number;
+      have: number;
+    }> = [];
+    (
+      Object.keys(reqs.requiredPerLevel) as Array<unknown> as (
+        | 1
+        | 2
+        | 3
+        | 4
+        | 5
+      )[]
+    ).forEach((L) => {
+      const need = reqs.requiredPerLevel[L];
+      const have = byLevel[L];
+      if (have < need) shortfalls.push({ level: L, need, have });
+    });
+
+    res.json({
+      topic,
+      examQuestions,
+      havePerLevel: byLevel,
+      requiredPerLevel: reqs.requiredPerLevel,
+      sufficient: shortfalls.length === 0,
+      shortfalls, // helpful details for the UI
+    });
+  } catch (e: any) {
+    console.error("[getTopicSufficiency] failed:", e);
+    res.status(500).json({ error: "Server error" });
   }
 };

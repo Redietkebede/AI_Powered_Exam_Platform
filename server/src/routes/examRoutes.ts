@@ -12,6 +12,7 @@ import {
   getSessionQuestions,
   getTopics,
   getAvailableCount,
+  getRemaining,
 } from "../controllers/examController";
 
 const router = express.Router();
@@ -29,5 +30,6 @@ router.get("/sessions/:id/questions", verifyToken, getSessionQuestions);
 
 router.get("/questions/topics", verifyToken, getTopics);
 router.get("/questions/available", verifyToken, getAvailableCount);
+router.get("/sessions/:id/remaining", verifyToken, getRemaining);
 
 export default router;

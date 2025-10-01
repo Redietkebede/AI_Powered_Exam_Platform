@@ -99,27 +99,65 @@ const fail = (res: any, http: number, where: string, err?: unknown) =>
   });
 
 export const createSessionForCandidate: RequestHandler = async (req, res) => {
-  console.log("[createSessionForCandidate] body =", req.body);
-  // accept both shapes: {candidateId, topic, count} and {candidateIds, config}
+  // ——— helpers ———
+  const toMinutes = (v: any): number | null => {
+    if (v == null) return null;
+    if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
+    if (typeof v === "string") {
+      const m = v.match(/^\s*(\d+)\s*(m|min|minutes?)?\s*$/i);
+      if (m) return parseInt(m[1], 10);
+    }
+    return null;
+  };
+
+  // ——— input normalization ———
   const b = req.body ?? {};
+  console.log("[createSessionForCandidate] body =", b);
+
+  // time: accept many shapes (wizard variants)
+  const minutes =
+    toMinutes(b.allowedTimeMinutes) ??
+    toMinutes(b.timeLimitMinutes) ??
+    toMinutes(b.timeLimit) ??
+    toMinutes(b.durationMinutes) ??
+    toMinutes(b.duration) ??
+    toMinutes(b?.config?.allowedTimeMinutes) ??
+    toMinutes(b?.config?.timeLimitMinutes) ??
+    toMinutes(b?.config?.timeLimit) ??
+    toMinutes(b?.config?.durationMinutes) ??
+    toMinutes(b?.config?.duration) ??
+    toMinutes(b?.config?.review?.timeLimit) ??
+    null;
+
+  // if caller sends raw seconds, accept too
+  const bodySeconds = Number(
+    b.total_time_seconds ?? b?.config?.total_time_seconds
+  );
+  const total_time_seconds =
+    minutes != null && minutes > 0
+      ? minutes * 60
+      : Number.isFinite(bodySeconds) && bodySeconds > 0
+      ? Math.floor(bodySeconds)
+      : null; // NULL means "no limit" at insert time
+
   const candidateRef = String(
     b.candidateId ?? (Array.isArray(b.candidateIds) ? b.candidateIds[0] : "")
   ).trim();
 
   const topic = String(b.topic ?? b?.config?.topic ?? "").trim();
-  const count = Math.max(
-    1,
-    Math.min(50, Number(b.count ?? b?.config?.count) || 1)
-  );
 
-  // difficulty is OPTIONAL (keep for compatibility)
+  const rawCount = b.count ?? b?.config?.count;
+  const count =
+    rawCount == null ? null : Math.max(1, Math.min(50, Number(rawCount) || 1));
+
+  // optional difficulty (compat)
   const diffRaw = b.difficulty ?? b?.config?.difficulty;
   const difficulty =
     diffRaw === undefined || diffRaw === null || String(diffRaw).trim() === ""
       ? null
       : String(diffRaw).trim();
 
-  if (!candidateRef || !topic || !count) {
+  if (!candidateRef || !topic || count == null) {
     return res
       .status(400)
       .json({ error: "Missing required fields (candidateId, topic, count)." });
@@ -130,7 +168,7 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Step A: resolve candidateRef (id-as-text OR email) to numeric users.id
+    // A) resolve candidate (id-as-text OR email) -> numeric users.id
     where = "resolve_candidate";
     const cand = await client.query(
       `SELECT id FROM users WHERE id::text = $1 OR email = $1 LIMIT 1`,
@@ -142,7 +180,7 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
     }
     const candidateId: number = cand.rows[0].id;
 
-    // Step B: detect exam_sessions.test_id nullability
+    // B) detect test_id nullability
     where = "introspect_test_id";
     const testIdMeta = await client.query(`
       SELECT is_nullable
@@ -153,7 +191,7 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
     `);
     const testIdIsNotNull = (testIdMeta.rows[0]?.is_nullable ?? "YES") === "NO";
 
-    // Step C: try to resolve/create tests(topic) -> testId (DO THIS ALWAYS if possible)
+    // C) resolve/create tests(topic) -> testId (always try)
     let testId: number | null = null;
     where = "maybe_get_or_create_test";
     const testsTable = await client.query(`
@@ -166,7 +204,7 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
 
     if (haveTestsTable) {
       const found = await client.query(
-        `SELECT id FROM tests WHERE LOWER(topic)=LOWER($1) LIMIT 1`,
+        `SELECT id FROM tests WHERE LOWER(topic) = LOWER($1) LIMIT 1`,
         [topic]
       );
       if (found.rowCount) {
@@ -179,13 +217,11 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
         testId = insTest.rows[0].id;
       }
     } else if (testIdIsNotNull) {
-      // We must have a testId but there's no tests table -> fail loudly instead of inserting NULL
       await client.query("ROLLBACK");
       return fail(res, 500, "tests_table_missing");
     }
-    // If column nullable and no tests table, we continue with testId=null (best effort)
 
-    // Step D: discover "published" predicate and available questions
+    // D) check available published questions for topic (+ optional difficulty)
     where = "introspect_questions_columns";
     const wanted = [
       "status",
@@ -218,7 +254,6 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
     where = "check_available_questions";
     const useTopic = cols.has("topic");
 
-    // Base SQL has $1 for topic (topic string or NULL)
     let availSql = `
       SELECT COUNT(*)::int AS c
       FROM questions q
@@ -229,7 +264,6 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
     `;
     const params: any[] = [topic || null];
 
-    // Only add difficulty when provided AND column exists
     if (difficulty && cols.has("difficulty")) {
       const diffTypeRes = await client.query(
         `SELECT data_type
@@ -255,10 +289,9 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
           "4": 4,
           "5": 5,
         };
-        const dnum =
-          labelToNum[
-            difficulty.toLowerCase?.() || String(difficulty).toLowerCase()
-          ] ?? Number(difficulty);
+        const key =
+          difficulty.toLowerCase?.() || String(difficulty).toLowerCase();
+        const dnum = labelToNum[key] ?? Number(difficulty);
         availSql += ` AND ($2::int IS NULL OR q.difficulty = $2::int)`;
         params.push(Number.isFinite(dnum) ? dnum : null);
       } else {
@@ -269,8 +302,7 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
 
     const avail = await client.query(availSql, params);
     const available = avail.rows[0]?.c ?? 0;
-
-    if (available < count) {
+    if (available < (count ?? 0)) {
       await client.query("ROLLBACK");
       return res.status(422).json({
         error: "Not enough published questions for the selected topic.",
@@ -279,12 +311,12 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
       });
     }
 
-    // Step E: prevent multiple open sessions
+    // E) prevent multiple open sessions
     where = "check_open_session";
     if (testId != null) {
       const open = await client.query(
         `SELECT id FROM exam_sessions
-         WHERE user_id=$1 AND test_id=$2 AND finished_at IS NULL
+         WHERE user_id = $1 AND test_id = $2 AND finished_at IS NULL
          LIMIT 1`,
         [candidateId, testId]
       );
@@ -298,7 +330,7 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
     } else {
       const open = await client.query(
         `SELECT id FROM exam_sessions
-         WHERE user_id=$1 AND finished_at IS NULL
+         WHERE user_id = $1 AND finished_at IS NULL
          LIMIT 1`,
         [candidateId]
       );
@@ -311,21 +343,50 @@ export const createSessionForCandidate: RequestHandler = async (req, res) => {
       }
     }
 
-    // Step F: create the session
+    // F) create the session (typed placeholders everywhere)
     where = "insert_session";
     let ins;
+    console.log("[createSessionForCandidate] minutes, total_time_seconds =", {
+      allowedTimeMinutes: b?.allowedTimeMinutes,
+      config_allowedTimeMinutes: b?.config?.allowedTimeMinutes,
+      timeLimitMinutes: b?.timeLimitMinutes,
+      timeLimit: b?.timeLimit,
+      total_time_seconds, // <- computed number or null
+    });
+
     if (testId != null) {
       ins = await client.query(
-        `INSERT INTO exam_sessions (user_id, test_id, started_at, total_questions)
-         VALUES ($1, $2, NOW(), $3) RETURNING id`,
-        [candidateId, testId, count]
+        `INSERT INTO exam_sessions
+           (user_id, test_id, started_at, total_questions,
+            total_time_seconds, time_remaining_seconds, deadline_at, last_event_at)
+         VALUES
+           ($1, $2, NOW(), $3::int,
+            $4::int,
+            $4::int,
+            CASE WHEN $4 IS NOT NULL
+                 THEN NOW() + make_interval(secs => $4::int)
+                 ELSE NULL
+            END,
+            NOW())
+         RETURNING id`,
+        [candidateId, testId, count, total_time_seconds]
       );
     } else {
-      // Only used if testId couldn't be resolved and column is nullable
       ins = await client.query(
-        `INSERT INTO exam_sessions (user_id, started_at, total_questions)
-         VALUES ($1, NOW(), $2) RETURNING id`,
-        [candidateId, count]
+        `INSERT INTO exam_sessions
+           (user_id, started_at, total_questions,
+            total_time_seconds, time_remaining_seconds, deadline_at, last_event_at)
+         VALUES
+           ($1, NOW(), $2::int,
+            $3::int,
+            $3::int,
+            CASE WHEN $3 IS NOT NULL
+                 THEN NOW() + make_interval(secs => $3::int)
+                 ELSE NULL
+            END,
+            NOW())
+         RETURNING id`,
+        [candidateId, count, total_time_seconds]
       );
     }
 
@@ -510,20 +571,38 @@ export const updateAssignment: RequestHandler = async (req, res) => {
   const body = req.body ?? {};
   const totalQuestions = Number(body.total_questions ?? body.totalQuestions);
   const finishNow = body.finishNow === true;
-
+  const minutes = Number(body.allowedTimeMinutes ?? body.allowed_time_minutes);
+  const seconds = Number(body.total_time_seconds);
   const sets: string[] = [];
   const params: any[] = [];
+
+  const newTotalSeconds =
+    Number.isFinite(minutes) && minutes > 0
+      ? Math.round(minutes * 60)
+      : Number.isFinite(seconds) && seconds > 0
+      ? Math.floor(seconds)
+      : null;
 
   if (Number.isFinite(totalQuestions) && totalQuestions > 0) {
     sets.push(`total_questions = $${params.length + 1}`);
     params.push(totalQuestions);
   }
-  if (finishNow) {
-    sets.push(`finished_at = NOW()`); // no param needed
+  if (newTotalSeconds != null) {
+    // set the configured total time
+    sets.push(`total_time_seconds = $${params.length + 1}`);
+    params.push(newTotalSeconds);
+    // if not finished, reset the countdown based on NOW()
+    sets.push(
+      `time_remaining_seconds = CASE WHEN finished_at IS NULL THEN $${params.length} ELSE time_remaining_seconds END`
+    );
+    params.push(newTotalSeconds);
+    sets.push(
+      `deadline_at = CASE WHEN finished_at IS NULL THEN NOW() + ($${params.length} || ' seconds')::interval ELSE deadline_at END`
+    );
+    params.push(newTotalSeconds);
   }
-
-  if (sets.length === 0) {
-    return res.status(400).json({ error: "No editable fields provided" });
+  if (finishNow) {
+    sets.push(`finished_at = NOW()`);
   }
 
   const sql = `

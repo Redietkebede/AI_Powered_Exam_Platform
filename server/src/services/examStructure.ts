@@ -5,6 +5,58 @@ import { logBadGen } from "../doc/logBadGen";
 import { validateQuestion } from "./validateQuestion";
 import type { Question } from "../middleware/qustions";
 
+/** --- Robust JSON parsing for flaky model outputs --- */
+function sanitizeJsonLike(text: string): string {
+  let out = String(text ?? "");
+
+  // strip code fences and "json:" labels
+  out = out.replace(/```[a-z]*\s*/gi, "").replace(/```/g, "");
+  out = out.replace(/^\s*json\s*:/i, "");
+
+  // normalize quotes
+  out = out.replace(/[“”]/g, '"').replace(/[‘’‛‹›′`]/g, "'");
+
+  // join accidental "...." + "...."
+  if (/^".*"\s*\+\s*".*"$/.test(out)) {
+    out = out
+      .replace(/\s*\+\s*/g, "")
+      .replace(/^"/, "")
+      .replace(/"$/, "");
+  }
+
+  // remove trailing commas before } or ]
+  out = out.replace(/,\s*([}\]])/g, "$1");
+
+  // key=value  ->  "key": value   (only after { or ,)
+  out = out.replace(
+    /([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*)=(\s*)/g,
+    '$1"$2": '
+  );
+
+  // ensure keys are quoted: { key: ... } -> { "key": ... }
+  out = out.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*):/g, '$1"$2"$3:');
+
+  return out.trim();
+}
+
+function tryParseJson(text: string): any | null {
+  const cleaned = sanitizeJsonLike(text);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // last resort: parse first {...} or [...] fragment
+    const m = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+    if (m) {
+      try {
+        return JSON.parse(m[0]);
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+}
+
 // ---- env & client ----
 const { OPENROUTER_API_KEY, LLM_BASE_URL, LLM_MODEL } = process.env;
 if (!OPENROUTER_API_KEY || !LLM_BASE_URL || !LLM_MODEL) {
@@ -123,71 +175,107 @@ export async function generateQuestions(
 
   // 1) LLM call
   const resp = await callLLM(userContent, getRandomTemp());
-  const raw = resp?.choices[0]?.message?.content ?? "";
-  const cleaned = coerceJSON(raw);
+  const raw = resp?.choices?.[0]?.message?.content ?? "";
 
-  // 2) Parse JSON
-  let parsed: any;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch (error) {
-    console.error("[LLM json-parse-error]", { cleaned, error: String(error) });
-    throw new Error("LLM returned non-JSON content");
+  // quick, non-destructive cleanup (keeps your original step)
+  const cleanedViaHelper = coerceJSON(raw);
+
+  // 2) Parse JSON (tolerant)
+  let parsed: any = tryParseJson(cleanedViaHelper);
+  if (!parsed) {
+    console.error("[LLM json-parse-error]", {
+      cleaned: sanitizeJsonLike(cleanedViaHelper).slice(0, 800),
+      error: "parse failed",
+    });
+    // return empty so caller can continue other levels without exploding
+    const durationMs = Date.now() - start;
+    return {
+      topic,
+      difficulty,
+      questions: [] as Question[],
+      generation_time: formatDuration(durationMs),
+    };
   }
 
-  // 3) Validate schema
+  // 3) Validate schema (tolerant: log and return empty on failure)
   const result = ExamJSONSchema.safeParse(parsed);
   if (!result.success) {
     logBadGen("schema-validation-failed", {
       topic,
       difficulty,
       raw,
-      cleaned,
+      cleaned: cleanedViaHelper,
       nod: result.error.flatten(),
     });
-    throw new Error("LLM JSON failed schema validation");
+    const durationMs = Date.now() - start;
+    return {
+      topic,
+      difficulty,
+      questions: [] as Question[],
+      generation_time: formatDuration(durationMs),
+    };
   }
 
-  // 4) Normalize + validate
-  const payload = result.data;
+  // 4) Normalize + validate each question
+  const payload = result.data as any;
+  const srcArray = Array.isArray(payload?.questions) ? payload.questions : [];
 
-  payload.questions = payload.questions
+  payload.questions = srcArray
     .map((q: any): Question | null => {
-      // ✅ sanity check
+      // presence checks
       if (
-        !q.question_text ||
-        !Array.isArray(q.options) ||
+        !q?.question_text ||
+        !Array.isArray(q?.options) ||
         q.options.length < 2
       ) {
         console.warn("⚠️ Skipping invalid question:", q);
         return null;
       }
-      console.log(q.question_text, q.options, q.correct_answer,q.explanation);
+
+      // normalize options to strings
+      const opts = (q.options as any[])
+        .map((o) => String(o ?? ""))
+        .filter(Boolean);
+      if (opts.length < 2) return null;
+
+      // derive correct index: accept 0-based, 1-based, or text answer
+      let idx: number =
+        typeof q.correct_answer === "number"
+          ? q.correct_answer
+          : (() => {
+              const asText = String(q.correct_answer ?? "")
+                .trim()
+                .toLowerCase();
+              if (!asText) return -1;
+              return opts.findIndex(
+                (opt) => opt.trim().toLowerCase() === asText
+              );
+            })();
+
+      // 1..n -> 0..(n-1)
+      if (Number.isFinite(idx) && idx >= 1 && idx <= opts.length) idx = idx - 1;
+
+      // clamp / reject
+      if (!Number.isFinite(idx) || idx < 0 || idx >= opts.length) {
+        console.warn("⚠️ Skipping question with invalid correct_answer:", q);
+        return null;
+      }
+
       const normalizedQ: Question = {
-        id: q.id ?? crypto.randomUUID(), 
+        id: q.id ?? crypto.randomUUID(),
         topic: q.topic ?? "General",
         difficulty: Number(q.difficulty) || 1,
-        question_text: q.question_text,
-        options: q.options,
-
-        correct_answer:
-          typeof q.correct_answer === "number"
-            ? q.correct_answer
-            : q.options.findIndex(
-                (opt: string) =>
-                  opt.trim().toLowerCase() ===
-                  String(q.correct_answer).trim().toLowerCase()
-              ),
-
+        question_text: String(q.question_text),
+        options: opts,
+        correct_answer: idx,
         explanation: q.explanation ?? null,
-        tags: Array.isArray(q.tags) ? q.tags : [],
+        tags: Array.isArray(q.tags) ? q.tags.map(String) : [],
         created_at: q.created_at ?? new Date().toISOString(),
       };
 
-      // ✅ validate
       return validateQuestion(normalizedQ) ? normalizedQ : null;
     })
-    .filter((q): q is Question => q !== null); // TS-safe filter
+    .filter((qq: Question | null): qq is Question => qq !== null);
 
   const durationMs = Date.now() - start;
 

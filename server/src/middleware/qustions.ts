@@ -12,33 +12,49 @@ export type Question = {
   created_at: string;
 };
 
-export async function insertQuestion(q: {
+// keep the same exported type if you already have one
+export type InsertQuestion = {
   topic: string;
   question_text: string;
-  options: string[]; // 4 choices
-  correct_answer: number; // 0-3
-  difficulty: number;
-  tags?: string[];
-  explanation?: string[] | null; // only if you added this column
-}) {
+  options: string[]; // exactly 4
+  correct_answer: number; // 0..3
+  difficulty: number; // 1..5
+  tags?: string[]; // text[]
+  explanation?: string[] | null; // text[] | null
+  status?: string; // optional
+  type?: string; // optional
+};
+
+export async function insertQuestion(row: InsertQuestion) {
+  const tagsArr: string[] = Array.isArray(row.tags) ? row.tags.map(String) : [];
+  const explArr: string[] | null =
+    row.explanation == null ? null : row.explanation.map(String);
+
+  // inside insertQuestion(...)
   const sql = `
-    INSERT INTO questions
-      (topic, question_text, options, correct_answer, difficulty, tags, status)
-    VALUES
-      ($1,    $2,            $3::jsonb, $4,            $5,         $6::text[], 'draft')
-    ON CONFLICT (topic, question_text) DO NOTHING
-    RETURNING *;
-  `;
-  const vals = [
-    q.topic, // $1
-    q.question_text, // $2
-    q.options, // $3 -> jsonb (no stringify)
-    q.correct_answer, // $4 -> 'A'|'B'|'C'|'D'
-    q.difficulty, // $5
-    Array.isArray(q.tags) ? q.tags : [], // $6 -> text[]
+  INSERT INTO questions
+    (topic, question_text, options, correct_answer, difficulty, tags, explanation, status, type)
+  VALUES
+    ($1,    $2,           $3::jsonb, $4,            $5,         $6::text[], $7::text[], COALESCE($8,'draft'), COALESCE($9,'MCQ'))
+  ON CONFLICT ON CONSTRAINT questions_topic_question_text_key DO NOTHING
+  RETURNING id
+`;
+
+  const params = [
+    row.topic,
+    row.question_text,
+    JSON.stringify(row.options),
+    row.correct_answer,
+    row.difficulty,
+    Array.isArray(row.tags) ? row.tags.map(String) : [],
+    row.explanation == null ? null : row.explanation.map(String),
+    row.status ?? "draft",
+    row.type ?? "MCQ",
   ];
-  const { rows } = await pool.query(sql, vals);
-  return rows[0] as Question | undefined;
+
+  const { rows } = await pool.query(sql, params);
+  // rows.length === 0 => duplicate skipped
+  return rows[0]?.id ?? null;
 }
 
 export async function getQuestions(

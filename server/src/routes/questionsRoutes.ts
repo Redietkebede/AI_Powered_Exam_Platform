@@ -10,6 +10,7 @@ import {
   listPublishedQuestions,
   listTopicsWithCounts,
   countAvailableForTopic,
+  getTopicSufficiency,
 } from "../controllers/questionControllers";
 
 const router = Router();
@@ -72,6 +73,13 @@ router.delete(
   verifyToken,
   authorize(["admin", "editor"]),
   deleteQuestionById
+);
+
+router.get(
+  "/questions/sufficiency",
+  verifyToken,
+  authorize(["recruiter", "editor"]),
+  getTopicSufficiency
 );
 
 export default router;

@@ -14,6 +14,8 @@ import questionsRoutes from './routes/questionsRoutes';
 import authRoutes from './routes/authRoutes';
 import publishRoutes from "./routes/publishRoutes";
 import assignmentRoutes from "./routes/assignmentRoutes";
+import attemptsRoutes from "./routes/attemptsRoutes";
+import analyticsRoutes from "./routes/analyticsRoutes";
 
 import { ZodError } from "zod";
 import { formatZodError } from "./utils/zodError";
@@ -74,6 +76,8 @@ app.use("/api", assignmentRoutes);
 app.use('/api', examsRoutes);
 app.use('/api', questionsRoutes);
 app.use('/api', usersRoutes);
+app.use("/api", attemptsRoutes);
+app.use("/api", analyticsRoutes);
 
 app.use(
   (
