@@ -12,18 +12,20 @@ import {
   Legend,
 } from "chart.js";
 import {
-  getAnalyticsDetails,
-  getCandidates,
-  gettopics,
+  getAnalyticsOverview,
+  type AnalyticsOverview,
   type AnalyticsFilters,
 } from "../../services/analytics";
+
 import { ShieldAlert, Users, Trophy, Activity, Filter } from "lucide-react";
 import { getCurrentUser } from "../../services/userService";
+
+const DEBUG_UI = true; // flip to false later
 
 ChartJS.register(
   CategoryScale,
   LinearScale,
-  BarElement,
+  BarElement, 
   PointElement,
   LineElement,
   Tooltip,
@@ -41,6 +43,7 @@ export default function AnalyticsPage() {
       try {
         const me = await getCurrentUser(); // { id, role, ... }
         if (alive) setRole(me.role);
+        if (DEBUG_UI) console.debug("[AnalyticsPage] role ←", me.role);
       } catch {
         if (alive) setRole(null);
       }
@@ -53,46 +56,72 @@ export default function AnalyticsPage() {
 
   /** ─────────────────── Filters & static lists ─────────────────── */
   const [filters, setFilters] = useState<AnalyticsFilters>({});
+  const [summary, setSummary] = useState<AnalyticsOverview | null>(null);
+  const [loading, setLoading] = useState(false);
+  // derive testId from query (?testId=123)
+  const params = new URLSearchParams(window.location.search);
+  const testId = Number(params.get("testId") ?? "");
+  const testIdOrUndefined = Number.isFinite(testId) ? testId : undefined;
 
-  // ⚠️ FIX: ensure we always have an array before mapping (prevents "map is not a function")
-  const candidateOptions = useMemo<string[]>(() => {
-    try {
-      const v = getCandidates();
-      return Array.isArray(v) ? (v as string[]) : [];
-    } catch {
-      return [];
-    }
-  }, []);
+  // Topics come from the current summary payload (labels only)
+  const topics = useMemo<string[]>(
+    () => (summary?.topicInsights ?? []).map((t: any) => t.topic),
+    [summary]
+  );
 
-  const [topics, settopics] = useState<string[]>([]);
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const subj = await gettopics(filters.topic ?? "");
-        if (alive) settopics(Array.isArray(subj) ? subj : []);
-      } catch {
-        if (alive) settopics([]);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [filters.topic]);
+  // Candidate dropdown options — keep empty (you can wire a list later)
+  const candidateOptions: string[] = [];
 
   /** ─────────────────── Analytics data (safe) ─────────────────── */
-  type Details = Awaited<ReturnType<typeof getAnalyticsDetails>>;
-  const [summary, setSummary] = useState<Details | null>(null);
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     (async () => {
       try {
-        const d = await getAnalyticsDetails(filters.topic ?? "", filters);
+        const out = {
+          testId: testIdOrUndefined,
+          candidateId: (filters as any).candidate ?? undefined,
+          topic: filters.topic || undefined,
+          difficulty: filters.difficulty || undefined,
+        };
+        if (DEBUG_UI) console.debug("[AnalyticsPage] filters →", out);
+
+        const raw = await getAnalyticsOverview(out);
+
+        // reuse your helper
+        const normalizeOverview = (d: any) => {
+          if (!d) return d;
+          if (!d.scoresByDifficulty && Array.isArray(d.byDifficulty)) {
+            d.scoresByDifficulty = d.byDifficulty.map((x: any) => ({
+              difficulty: String(x.difficulty),
+              accuracy_pct: Number(x.accuracy_pct) || 0,
+            }));
+          }
+          if (
+            !Array.isArray(d.performanceOverTime) &&
+            Array.isArray(d.timeline)
+          ) {
+            d.performanceOverTime = d.timeline;
+          }
+          return d;
+        };
+
+        const d = normalizeOverview(raw);
+
+        if (DEBUG_UI) {
+          console.debug("[AnalyticsPage] overview ←", d);
+          console.debug("[AnalyticsPage] charts len", {
+            timeline: d.performanceOverTime?.length ?? 0,
+            byDifficulty: d.scoresByDifficulty?.length ?? 0,
+            topicInsights: d.topicInsights?.length ?? 0,
+            timeSpentSeconds: d.timeSpentSeconds?.length ?? 0,
+          });
+        }
+
         if (alive) setSummary(d);
-      } catch {
+      } catch (e) {
+        if (DEBUG_UI) console.debug("[AnalyticsPage] overview error", e);
         if (alive) setSummary(null);
       } finally {
         if (alive) setLoading(false);
@@ -101,61 +130,130 @@ export default function AnalyticsPage() {
     return () => {
       alive = false;
     };
-  }, [filters]);
+    // IMPORTANT: refetch when the UI "candidate" changes (not candidateId)
+  }, [
+    (filters as any).candidate,
+    filters.topic,
+    filters.difficulty,
+    testIdOrUndefined,
+  ]);
 
-  // SAFE fallbacks
-  const safeTimeline = summary?.timeline ?? [];
-  const safeByDifficulty = summary?.byDifficulty ?? [];
-  const safeTimeHist = summary?.timeHistogram ?? { labels: [], counts: [] };
-  const safeTopPerformers = summary?.topPerformers ?? [];
-  const safeRecent = summary?.recentActivity ?? [];
-  const kpis = summary?.kpis ?? {
-    candidates: 0,
-    exams: 0,
-    avgScore: 0,
-    questions: 0,
+  // normalize overview shape (supports both scoresByDifficulty and byDifficulty)
+  const normalizeOverview = (d: any) => {
+    if (!d) return d;
+    if (!d.scoresByDifficulty && Array.isArray(d.byDifficulty)) {
+      d.scoresByDifficulty = d.byDifficulty.map((x: any) => ({
+        difficulty: String(x.difficulty),
+        accuracy_pct: Number(x.accuracy_pct) || 0,
+      }));
+    }
+    if (!Array.isArray(d.performanceOverTime) && Array.isArray(d.timeline)) {
+      d.performanceOverTime = d.timeline; // tolerate alt key
+    }
+    return d;
   };
-  const topicStats = summary?.topicStats ?? [];
+
+  // SAFE fallbacks mapped to the new API shape
+  const kpis = {
+    candidates: summary?.candidates ?? 0,
+    exams: summary?.examsTaken ?? 0,
+    avgScore: summary?.avgScore ?? 0,
+    questions: summary?.questions ?? 0,
+  };
+
+  // charts data (typed to silence implicit-any)
+  const safeTimeline: Array<{ label: string; score: number }> =
+    summary?.performanceOverTime ?? [];
+
+  const safeByDifficulty: Array<{ difficulty: string; accuracy_pct: number }> =
+    summary?.scoresByDifficulty ?? [];
+
+  // simple “histogram” from seconds list
+  const safeTimeHist = {
+    labels: (summary?.timeSpentSeconds ?? []).map((_, i) => `A${i + 1}`),
+    counts: summary?.timeSpentSeconds ?? [],
+  };
+
+  // topic table rows
+  const topicStats: Array<{
+    topic: string;
+    accuracy: number;
+    avgTimeSec: number;
+  }> = (summary?.topicInsights ?? []).map((t) => ({
+    topic: t.topic,
+    accuracy: Math.round(t.accuracy_pct || 0),
+    avgTimeSec: 0, // server doesn't provide avg time per topic (yet)
+  }));
+
+  // Sections not provided by the API yet – keep as empty lists for now
+  const safeTopPerformers: Array<{
+    candidate: string;
+    lastActive?: string;
+    score?: number;
+    attempts?: number;
+  }> = [];
+  const safeRecent: Array<{
+    candidate: string;
+    date: string;
+    score?: number;
+    correct?: number;
+    total?: number;
+  }> = [];
+
+  if (DEBUG_UI) {
+    console.debug("[AnalyticsPage] render.kpis", kpis);
+    console.debug("[AnalyticsPage] render.counts", {
+      timeline: safeTimeline.length,
+      byDifficulty: safeByDifficulty.length,
+      topics: topicStats.length,
+      timeBuckets: safeTimeHist.counts.length,
+    });
+  }
 
   /** ─────────────────── Charts (derived) ─────────────────── */
-  const lineData = useMemo(
-    () => ({
-      labels: safeTimeline.map((t) => t.label),
+  const lineData = useMemo(() => {
+    return {
+      labels: safeTimeline.map(
+        (t: { label: string; score: number }) => t.label
+      ),
       datasets: [
         {
           label: "Average Score",
-          data: safeTimeline.map((t) => t.score),
+          data: safeTimeline.map(
+            (t: { label: string; score: number }) => t.score
+          ),
           borderColor: "#ff7a59",
           backgroundColor: "rgba(255,122,89,0.1)",
           borderWidth: 3,
           tension: 0.4,
         },
       ],
-    }),
-    [safeTimeline]
-  );
+    };
+  }, [safeTimeline]);
 
-  const barData = useMemo(
-    () => ({
-      labels: safeByDifficulty.map((b) => b.label),
+  const barData = useMemo(() => {
+    return {
+      labels: safeByDifficulty.map(
+        (b: { difficulty: string; accuracy_pct: number }) => b.difficulty
+      ),
       datasets: [
         {
           label: "Avg Score",
-          data: safeByDifficulty.map((b) => b.score),
+          data: safeByDifficulty.map(
+            (b: { difficulty: string; accuracy_pct: number }) =>
+              Math.round(b.accuracy_pct || 0)
+          ),
           backgroundColor: [
-            "#ffdacd",
+            "#ffd2c6",
             "#ffc3b0",
-            "#ffab94",
-            "#ff947b",
+            "#ffa894",
+            "#ff947d",
             "#ff7a59",
           ],
-          borderRadius: 8,
-          borderSkipped: false,
         },
       ],
-    }),
-    [safeByDifficulty]
-  );
+    };
+  }, [safeByDifficulty]);
 
   const timeHistData = useMemo(
     () => ({
@@ -294,13 +392,13 @@ export default function AnalyticsPage() {
               Candidate
             </label>
             <select
-              value={filters.candidate ?? ""}
-              onChange={(e) =>
-                setFilters((f) => ({
-                  ...f,
-                  candidate: e.target.value || undefined,
-                }))
-              }
+              value={(filters as any).candidate ?? ""}
+              onChange={(e) => {
+                const v = e.target.value || undefined;
+                if (DEBUG_UI)
+                  console.debug("[AnalyticsPage] setFilters.candidate", v);
+                setFilters((f) => ({ ...(f as any), candidate: v }));
+              }}
               className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
             >
               <option value="">All candidates</option>
@@ -317,12 +415,12 @@ export default function AnalyticsPage() {
             </label>
             <select
               value={filters.topic ?? ""}
-              onChange={(e) =>
-                setFilters((f) => ({
-                  ...f,
-                  topic: e.target.value || undefined,
-                }))
-              }
+              onChange={(e) => {
+                const v = e.target.value || undefined;
+                if (DEBUG_UI)
+                  console.debug("[AnalyticsPage] setFilters.topic", v);
+                setFilters((f) => ({ ...f, topic: v }));
+              }}
               className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
             >
               <option value="">All topics</option>
@@ -339,12 +437,12 @@ export default function AnalyticsPage() {
             </label>
             <select
               value={(filters.difficulty as any) ?? ""}
-              onChange={(e) =>
-                setFilters((f) => ({
-                  ...f,
-                  difficulty: (e.target.value as any) || undefined,
-                }))
-              }
+              onChange={(e) => {
+                const v = (e.target.value as any) || undefined;
+                if (DEBUG_UI)
+                  console.debug("[AnalyticsPage] setFilters.difficulty", v);
+                setFilters((f) => ({ ...f, difficulty: v }));
+              }}
               className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
             >
               <option value="">All difficulties</option>
@@ -559,9 +657,9 @@ export default function AnalyticsPage() {
             Top Performers
           </h3>
           <div className="space-y-4">
-            {(safeTopPerformers ?? []).map((p: any, index: number) => (
+            {safeTopPerformers.map((p, index) => (
               <div
-                key={p.candidate}
+                key={(p.candidate ?? index) + ""}
                 className="flex items-center justify-between p-4 bg-gray-50 rounded-lg"
               >
                 <div className="flex items-center">
@@ -595,7 +693,7 @@ export default function AnalyticsPage() {
                 </div>
               </div>
             ))}
-            {(safeTopPerformers ?? []).length === 0 && (
+            {safeTopPerformers.length === 0 && (
               <div className="text-center text-gray-500 py-8">
                 No performance data available
               </div>
@@ -609,9 +707,11 @@ export default function AnalyticsPage() {
             Recent Activity
           </h3>
           <div className="space-y-4">
-            {(safeRecent ?? []).map((activity: any) => (
+            {safeRecent.map((activity, index) => (
               <div
-                key={`${activity.candidate}-${activity.date}`}
+                key={`${activity.candidate ?? "unknown"}-${
+                  activity.date ?? index
+                }`}
                 className="flex items-center justify-between p-4 bg-gray-50 rounded-lg"
               >
                 <div>

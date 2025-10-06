@@ -1,79 +1,79 @@
 // client/src/services/assignmentService.ts
 import { request } from "../lib/api";
 
+/* Parse minutes from many UI shapes: 30, "30", "30m", "30 min" */
+function toMinutes(input: unknown): number | null {
+  if (input == null) return null;
+  if (typeof input === "number" && Number.isFinite(input)) return Math.floor(input);
+  if (typeof input === "string") {
+    const m = input.match(/^\s*(\d+)\s*(m|min|minutes?)?\s*$/i);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
 /**
- * Existing signature preserved (do not change callers).
- * We adapt its payload to the BE session-creation endpoint.
+ * Existing signature preserved. We adapt config → BE payload and INCLUDE time.
  */
 export async function createAssignmentSvc(payload: {
   candidateIds: string[];
-  questionIds: number[]; // ignored here; questions come from DB by filters
-  config: any; // expects: topic, count (difficulty optional)
-  schedule: any; // unused for now
+  questionIds: number[];   // ignored here; DB picks by filters
+  config: any;             // topic, count, and may contain time in various keys
+  schedule: any;           // unused for now
 }) {
-  // --- Minimal adapter logic ---
+  // candidateId comes as string; coerce to number
   const firstCandidate = payload?.candidateIds?.[0];
-  const candidateId = String(firstCandidate ?? "").trim();
+  const candidateId = Number(firstCandidate);
+  if (!Number.isFinite(candidateId)) {
+    throw new Error("Invalid candidateId");
+  }
 
   const cfg = payload?.config ?? {};
 
-  // topic can be a single string or the first entry of topics[]
+  // topic may be a string or the first of topics[]
   const topic: string =
-    typeof cfg.topic === "string" && cfg.topic.trim().length > 0
+    typeof cfg.topic === "string" && cfg.topic.trim()
       ? cfg.topic.trim()
       : Array.isArray(cfg.topics)
       ? String(cfg.topics[0] ?? "").trim()
       : "";
 
-  // difficulty is OPTIONAL (kept for compatibility if UI still supplies it)
-  const difficulty =
-    cfg.difficulty ?? cfg.difficultyLabel ?? cfg.level ?? undefined;
-
-  // count can be named differently in older code paths
-  const rawCount =
-    cfg.count ?? cfg.questionCount ?? cfg.numQuestions ?? undefined;
+  const rawCount = cfg.count ?? cfg.questionCount ?? cfg.numQuestions;
   const count =
-    rawCount === undefined || rawCount === null
-      ? undefined
-      : Math.max(1, Math.min(50, Number(rawCount) || 0));
+    rawCount == null ? undefined : Math.max(1, Math.min(100, Number(rawCount) || 0));
 
-  // ✅ difficulty is NOT required
-  if (!candidateId || !topic || count == null) {
-    throw new Error(
-      "Missing required fields for session creation (candidateId, topic, count)."
-    );
+  if (!topic || count == null) {
+    throw new Error("Missing required fields (topic, count).");
   }
 
-  // --- Call the BE endpoint ---
+  // —— TIME LIMIT (the important part) ——
+  const minutes =
+    toMinutes(cfg.allowedTimeMinutes) ??
+    toMinutes(cfg.timeLimitMinutes) ??
+    toMinutes(cfg.timeLimit) ??
+    toMinutes(cfg.durationMinutes) ??
+    toMinutes(cfg.duration) ??
+    toMinutes(cfg?.review?.timeLimit) ??
+    null;
+
   const body: Record<string, unknown> = { candidateId, topic, count };
-  if (
-    difficulty !== undefined &&
-    difficulty !== null &&
-    String(difficulty).trim() !== ""
-  ) {
-    body.difficulty = difficulty;
+
+  // include minutes if present so BE stores seconds
+  if (minutes !== null && minutes >= 0) body.allowedTimeMinutes = minutes;
+
+  // if you have a test id in config, forward it
+  if (cfg.testId != null && Number.isFinite(Number(cfg.testId))) {
+    body.testId = Number(cfg.testId);
   }
 
-  try {
-    const res = await request("/assignments/create-session", {
-      method: "POST",
-      body,
-    });
+  const res = await request("/assignments/create-session", {
+    method: "POST",
+    body,
+  });
 
-    // Normalize so old callers using `result.id` still work.
-    const sessionId = (res as any)?.sessionId ?? (res as any)?.id;
-    if (!sessionId) {
-      throw new Error("Server did not return a session id");
-    }
-    return { id: sessionId, sessionId };
-  } catch (e: any) {
-    // Bubble meaningful server error text to the caller/toast
-    const msg =
-      (e?.payload && (e.payload.error || e.payload.message)) ||
-      e?.message ||
-      "Failed to create session";
-    throw new Error(String(msg));
-  }
+  const sessionId = (res as any)?.sessionId ?? (res as any)?.id;
+  if (!sessionId) throw new Error("Server did not return a session id");
+  return { id: sessionId, sessionId };
 }
 
 export async function deleteAssignmentSvc(id: string) {
@@ -82,7 +82,7 @@ export async function deleteAssignmentSvc(id: string) {
 
 export async function updateAssignmentSvc(
   id: string | number,
-  patch: { totalQuestions?: number; finishNow?: boolean }
+  patch: { totalQuestions?: number; finishNow?: boolean; allowedTimeMinutes?: number | string }
 ) {
   const body: any = {};
   if (Number.isFinite(patch.totalQuestions as number)) {
@@ -90,8 +90,12 @@ export async function updateAssignmentSvc(
   }
   if (patch.finishNow === true) body.finishNow = true;
 
+  const mins = toMinutes(patch.allowedTimeMinutes);
+  if (mins !== null && mins >= 0) body.allowedTimeMinutes = mins;
+
   return request(`/assignments/${id}`, { method: "PATCH", body });
 }
+
 export async function getAssignmentByIdSvc(id: string | number) {
   return request(`/assignments/${id}`, { method: "GET" });
 }
@@ -105,7 +109,7 @@ export type DbSessionRow = {
   finished_at?: string | null;
   user?: { id: number; name?: string | null };
   test?: { id: number; topic?: string | null };
-  topic?: string | null; // some APIs may include it directly
+  topic?: string | null;
 };
 
 export async function getMyAssignmentsSvc() {

@@ -2,6 +2,7 @@ import { getIdToken, clearToken, setToken } from "../services/authService";
 import { getAuth } from "firebase/auth";
 
 export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
+const DEBUG_API = true;
 
 export interface RequestOpts {
   method?: HttpMethod;
@@ -50,6 +51,8 @@ function buildUrl(path: string, params?: Record<string, unknown>) {
   const qs = usp.toString();
   return qs ? `${baseUrl}?${qs}` : baseUrl;
 }
+
+// Turn off later (or wire to VITE_DEBUG_API)
 
 export async function request<T = unknown>(
   path: string,
@@ -102,6 +105,13 @@ export async function request<T = unknown>(
       body,
     };
 
+    if (DEBUG_API) {
+      // Avoid printing raw FormData
+      const preview =
+        isFormData ? "[FormData]" : (body as string | undefined) ?? undefined;
+      console.debug("[API→]", method, url, { headers, body: preview });
+    }
+
     let res: Response;
     try {
       res = await fetch(url, init);
@@ -112,6 +122,7 @@ export async function request<T = unknown>(
       };
       err.status = 0;
       err.payload = null;
+      if (DEBUG_API) console.debug("[API←]", 0, url, "(network error)");
       throw err;
     }
 
@@ -130,6 +141,10 @@ export async function request<T = unknown>(
             ? payload
             : (payload as any)?.error || (payload as any)?.message || "";
         const looksLikeAuth = /unauth|token|expired|invalid/i.test(String(msg));
+        if (DEBUG_API) {
+          console.debug("[API←]", res.status, url, payload);
+          if (looksLikeAuth) console.debug("[API] retrying with token refresh…");
+        }
         if (res.status === 401 || res.status === 403 || looksLikeAuth) {
           return doFetch(true);
         }
@@ -146,6 +161,8 @@ export async function request<T = unknown>(
           ? await res.json()
           : await res.text();
       } catch {}
+      if (DEBUG_API) console.debug("[API←]", res.status, url, payload);
+
       const message =
         (payload &&
           typeof payload === "object" &&
@@ -167,29 +184,47 @@ export async function request<T = unknown>(
       throw err;
     }
 
-    if (res.status === 204) return undefined as T;
+    if (res.status === 204) {
+      if (DEBUG_API) console.debug("[API←]", 204, url, "(no content)");
+      return undefined as T;
+    }
 
     try {
       const ct = res.headers.get("content-type") || "";
-      if (ct.includes("application/json")) return (await res.json()) as T;
+      if (ct.includes("application/json")) {
+        const data = (await res.json()) as T;
+        if (DEBUG_API) console.debug("[API←]", res.status, url, data);
+        return data;
+      }
     } catch {
       // ignore parse errors; fall through
     }
+    if (DEBUG_API) console.debug("[API←]", res.status, url, "(no JSON body)");
     return undefined as T;
   }
 
   return doFetch(false);
 }
 
+
 export const api = {
-  get:   <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
+  get: <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
     request<T>(p, { ...(opts || {}), method: "GET" }),
-  post:  <T>(p: string, body?: unknown, opts?: Omit<RequestOpts, "method" | "body">) =>
-    request<T>(p, { ...(opts || {}), method: "POST",  body }),
-  put:   <T>(p: string, body?: unknown, opts?: Omit<RequestOpts, "method" | "body">) =>
-    request<T>(p, { ...(opts || {}), method: "PUT",   body }),
-  patch: <T>(p: string, body?: unknown, opts?: Omit<RequestOpts, "method" | "body">) =>
-    request<T>(p, { ...(opts || {}), method: "PATCH", body }),
-  del:   <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
+  post: <T>(
+    p: string,
+    body?: unknown,
+    opts?: Omit<RequestOpts, "method" | "body">
+  ) => request<T>(p, { ...(opts || {}), method: "POST", body }),
+  put: <T>(
+    p: string,
+    body?: unknown,
+    opts?: Omit<RequestOpts, "method" | "body">
+  ) => request<T>(p, { ...(opts || {}), method: "PUT", body }),
+  patch: <T>(
+    p: string,
+    body?: unknown,
+    opts?: Omit<RequestOpts, "method" | "body">
+  ) => request<T>(p, { ...(opts || {}), method: "PATCH", body }),
+  del: <T>(p: string, opts?: Omit<RequestOpts, "method" | "body">) =>
     request<T>(p, { ...(opts || {}), method: "DELETE" }),
 };

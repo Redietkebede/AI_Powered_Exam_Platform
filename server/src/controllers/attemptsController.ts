@@ -45,12 +45,22 @@ export const attemptSummary: RequestHandler = async (req, res, next) => {
     // Totals directly from answers using snake_case
     const totals = await pool.query(
       `
-      SELECT
-        COUNT(*)::int                                                             AS total_questions,
-        COALESCE(SUM(CASE WHEN is_correct THEN 1 ELSE 0 END), 0)::int            AS correct_questions
-      FROM answers
-      WHERE session_id = $1
-      `,
+  WITH t AS (
+    SELECT
+      es.total_questions::int AS total_questions
+    FROM exam_sessions es
+    WHERE es.id = $1
+    LIMIT 1
+  ),
+  c AS (
+    SELECT
+      COALESCE(SUM(CASE WHEN a.is_correct THEN 1 ELSE 0 END), 0)::int AS correct_questions
+    FROM answers a
+    WHERE a.session_id = $1
+  )
+  SELECT t.total_questions, c.correct_questions
+  FROM t CROSS JOIN c
+  `,
       [sessionId]
     );
 
@@ -121,20 +131,26 @@ export const getAttemptItems: RequestHandler = async (req, res, next) => {
         ELSE 'Medium'
       END
     `;
-
     const rows = await pool.query(
       `
-      SELECT
-        a.question_id                           AS "questionId",
-        a.is_correct                            AS "correct",
-        COALESCE(q.topic, '-')                  AS "topic",
-        ${difficultyLabelFromQuestions}         AS "difficulty",
-        (COALESCE(a.time_taken_sec, 0) * 1000)::int AS "timeSpentMs"
-      FROM answers a
-      LEFT JOIN questions q ON q.id = a.question_id
-      WHERE a.session_id = $1
-      ORDER BY a.id ASC
-      `,
+  SELECT
+    a.question_id                           AS "questionId",
+    a.is_correct                            AS "correct",
+    COALESCE(q.topic, '-')                  AS "topic",
+    CASE q.difficulty
+      WHEN 1 THEN 'Very Easy'
+      WHEN 2 THEN 'Easy'
+      WHEN 3 THEN 'Medium'
+      WHEN 4 THEN 'Hard'
+      WHEN 5 THEN 'Very Hard'
+      ELSE 'Medium'
+    END                                     AS "difficulty",
+    (COALESCE(a.time_taken_seconds, a.time_taken_sec, 0) * 1000)::int AS "timeSpentMs"
+  FROM answers a
+  LEFT JOIN questions q ON q.id = a.question_id
+  WHERE a.session_id = $1
+  ORDER BY a.id ASC
+  `,
       [sessionId]
     );
 

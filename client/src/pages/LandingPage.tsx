@@ -7,10 +7,10 @@ export default function LandingPage() {
     <div className="min-h-screen">
       {/* Header */}
       <header className="bg-white border-b border-slate-200/50 sticky top-0 z-50 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 h-20">
+        <div className="w-full px-6 h-20">
           <div className="flex items-center justify-between h-full">
             {/* Logo */}
-            <div className="flex items-center -ml-6">
+            <div className="flex items-center">
               <img src={logo} alt="MMCY Logo" className="h-10 w-auto" />
             </div>
 
@@ -28,7 +28,7 @@ export default function LandingPage() {
       </header>
 
       {/* Hero Section */}
-      <section className="relative overflow-hidden">
+      <section className="relative overflow-hidden lg:min-h-[calc(100vh-5rem)] 2xl:min-h-[calc(100vh-5rem)]">
         {/* Background Image with Overlay */}
         <div className="absolute inset-0 bg-gradient-to-r from-slate-800 via-slate-700 to-[#ff7a59] opacity-90">
           <div className="absolute inset-0 bg-black/20" />
@@ -43,18 +43,18 @@ export default function LandingPage() {
           <div className="absolute top-32 right-32 w-20 h-20 bg-white rounded-full" />
         </div>
 
-        <div className="relative max-w-7xl mx-auto px-6 py-20 lg:py-32">
+        <div className="relative w-full px-6 py-20 lg:py-32 lg:min-h[calc(100vh-5rem)] lg:flex lg:items-center 2xl:min-h-[calc(100vh-5rem)]">
           <div className="grid lg:grid-cols-2 gap-12 items-center">
             {/* Content */}
             <div className="text-white">
-              <h1 className="text-5xl lg:text-6xl font-bold leading-tight mb-6">
+              <h1 className="text-5xl lg:text-6xl xl:text-7xl 2xl:text-8xl font-bold leading-tight mb-6 max-w-4xl">
                 Transform your assessments.
                 <br />
                 <span className="text-white/80">
                   <RotatingText />
                 </span>
               </h1>
-              <p className="text-xl leading-relaxed text-white/90 mb-8 max-w-2xl">
+              <p className="text-xl xl:text-2xl 2xl:text-3xl leading-relaxed text-white/90 mb-8 max-w-2xl xl:max-w-3xl">
                 Our AI-Powered Exam Platform helps you assess skills with
                 intelligent question generation, adaptive testing, and
                 comprehensive analytics—fast, fair, and at scale.
@@ -66,12 +66,6 @@ export default function LandingPage() {
                 >
                   Get Started
                 </Link>
-                <a
-                  href="#learn"
-                  className="inline-flex items-center px-8 py-4 border-2 border-white/30 text-white font-semibold rounded-lg hover:bg-white/10 transition-all duration-300"
-                >
-                  Learn more
-                </a>
               </div>
             </div>
 
@@ -143,7 +137,7 @@ export default function LandingPage() {
 
       {/* Footer */}
       <footer className="relative z-10 border-t border-white/15 bg-gradient-to-r from-slate-800 via-slate-700 to-[#ff7a59]">
-        <div className="mx-auto max-w-7xl px-6 py-6 text-sm text-white/70">
+        <div className="w-full px-6 py-6 text-sm text-white/70">
           © {new Date().getFullYear()} AI-Powered Exam Platform · Transforming
           Assessment Technology
         </div>

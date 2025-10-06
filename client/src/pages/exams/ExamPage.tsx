@@ -1,26 +1,43 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  getAdaptiveNextQuestion,
-  startAttempt,
-} from "../../services/examService";
+import { startAttempt } from "../../services/examService";
 import type { Question } from "../../types/question";
 import { submitExam } from "../../services/answers";
 import { getPublishedQuestions } from "../../services/questionService";
 import type { DbQuestionRow as dbQuestionRow } from "../../adapters/dbQuestionRow";
 import { getSessionQuestions } from "../../services/sessions";
-
+import { getRemaining } from "../../services/examService"; // optional if you add a BE sync endpoint
 type Answer = { choiceIndex?: number; text?: string };
 
 /* -------------------- helpers -------------------- */
 
+const fmt = (sec: number) =>
+  `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+
 // Map numeric -> label your Question type uses
 const toDifficultyLabel = (n?: unknown): Question["difficulty"] => {
-  const v = Number(n);
-  if (v <= 1) return "Very Easy";
-  if (v === 2) return "Easy";
-  if (v === 3) return "Medium";
-  if (v === 4) return "Hard";
-  return "Very Hard";
+  const lvl = toDifficultyNum(n); // clamps to 1..5, defaults to 3
+  return lvl <= 1
+    ? "Very Easy"
+    : lvl === 2
+    ? "Easy"
+    : lvl === 3
+    ? "Medium"
+    : lvl === 4
+    ? "Hard"
+    : "Very Hard";
+};
+
+const levelToElo = (n?: number) => {
+  const L = Math.max(1, Math.min(5, Math.round(Number(n) || 3)));
+  return L === 1
+    ? 900
+    : L === 2
+    ? 1000
+    : L === 3
+    ? 1100
+    : L === 4
+    ? 1200
+    : 1300;
 };
 
 // Keep a numeric difficulty too (used by adaptive pick)
@@ -51,9 +68,16 @@ function buildBulkPayload(
 export default function ExamPage() {
   const [question, setQuestion] = useState<Question | null>(null);
   const [progress, setProgress] = useState({ index: 0, total: 0, correct: 0 });
+
+  // per-question timer (already existed)
   const [timer, setTimer] = useState(60);
   const [perQuestionSeconds, setPerQuestionSeconds] = useState(60);
   const timerRef = useRef<number | null>(null);
+
+  // ✅ total exam countdown (hard stop)
+  const [totalTimer, setTotalTimer] = useState<number | null>(null);
+  const totalTimerRef = useRef<number | null>(null);
+
   const [answer, setAnswer] = useState<Answer>({});
   const [finished, setFinished] = useState(false);
   const [showResults, setShowResults] = useState(false);
@@ -62,6 +86,10 @@ export default function ExamPage() {
   const [pool, setPool] = useState<Question[]>([]);
   const autoSubmittedRef = useRef(false);
   const [emptyPool, setEmptyPool] = useState(false);
+  const [totalSeconds, setTotalSeconds] = useState<number | null>(null);
+
+  // ✅ prevents re-seeding/overwriting server values
+  const seededRef = useRef(false);
 
   // Buffer of all selections in this attempt (questionId -> selection)
   const [selections, setSelections] = useState<
@@ -119,7 +147,12 @@ export default function ExamPage() {
       ci = Math.max(0, Math.min(ci, Math.max(0, choices.length - 1)));
     }
 
-    const diffRaw = q.difficulty ?? q.numericDifficulty;
+    const diffRaw =
+      q.difficulty ??
+      q.numericDifficulty ??
+      q.difficulty_level ??
+      q.level ??
+      q.difficultyLevel;
 
     return {
       id,
@@ -158,6 +191,10 @@ export default function ExamPage() {
           sessionIdRef.current = sid;
 
           const snap = await getSessionQuestions(sid);
+          if (snap && typeof (snap as any).total_time_seconds === "number") {
+            setTotalSeconds((snap as any).total_time_seconds);
+          }
+
           const mapped: Question[] = (Array.isArray(snap) ? snap : []).map(
             toQuestion
           );
@@ -172,21 +209,57 @@ export default function ExamPage() {
           setPool(mapped);
           setProgress((p) => ({ ...p, total: mapped.length }));
 
-          // 🔑 consume the first question through the adaptive picker
-          const first = getAdaptiveNextQuestion(mapped as any) ?? mapped[0];
+          // 🔑 FIRST QUESTION BY INDEX (no stateful helper)
+          const first = mapped[0];
           if (!first) {
             setEmptyPool(true);
             return;
           }
-          setQuestion(first); // set ONCE
-
-          // small redundancy for StrictMode
-          Promise.resolve().then(() => setQuestion(first));
-          setTimeout(() => setQuestion(first), 0);
-
+          setQuestion(first);
           questionStartRef.current = performance.now();
+
+          // Per-question timer keeps your previous UX
           setPerQuestionSeconds(60);
           setTimer(60);
+
+          // —— seed the single total exam timer ——
+          try {
+            const sid2 = sessionIdRef.current;
+            if (sid2) {
+              const j = await getRemaining(sid2);
+              if (typeof j.total === "number" && j.total > 0)
+                setTotalSeconds(j.total);
+
+              let seeded = false;
+              if (typeof j.remaining === "number") {
+                setTotalTimer(Math.max(0, Math.floor(j.remaining)));
+                seeded = true;
+              } else if (j.deadlineAt) {
+                const secs = Math.max(
+                  0,
+                  Math.floor(
+                    (new Date(j.deadlineAt).getTime() - Date.now()) / 1000
+                  )
+                );
+                setTotalTimer(secs);
+                seeded = true;
+              }
+              if (seeded) seededRef.current = true;
+            }
+          } catch {
+            /* ignore */
+          }
+
+          // Fallback only if BE gave nothing and we didn’t seed yet
+          if (!seededRef.current) {
+            const fallbackTotal =
+              typeof totalSeconds === "number" && totalSeconds > 0
+                ? totalSeconds
+                : 60 * (mapped.length || 0);
+            setTotalTimer(fallbackTotal);
+            seededRef.current = true;
+          }
+
           return;
         }
 
@@ -223,12 +296,6 @@ export default function ExamPage() {
                   ? String(a.config.topics[0]).trim()
                   : undefined);
               ids = Array.isArray(a?.questionIds) ? a.questionIds : [];
-              if (
-                typeof a?.config?.timeLimitMinutes === "number" &&
-                a.config.timeLimitMinutes > 0
-              ) {
-                perQSeconds = Math.round(a.config.timeLimitMinutes * 60);
-              }
             }
           }
         } catch {
@@ -273,7 +340,7 @@ export default function ExamPage() {
         try {
           newAttemptId = await startAttempt({
             testId: testId as number,
-            // topics: topicFilter ? [topicFilter] : undefined,  // <— remove to avoid over-filtering
+            // topics: topicFilter ? [topicFilter] : undefined,
             limit: mcq.length,
           });
         } catch (e: any) {
@@ -295,17 +362,57 @@ export default function ExamPage() {
         setAttemptId(String(newAttemptId));
         sessionIdRef.current = Number(newAttemptId);
 
-        const first = getAdaptiveNextQuestion(mcq as any) || mcq[0];
+        // FIRST QUESTION BY INDEX
+        const first = mcq[0];
         if (!first) {
           setEmptyPool(true);
           return;
         }
         setQuestion(first);
-
         questionStartRef.current = performance.now();
 
+        // Keep your per-question UX the same
         setPerQuestionSeconds(perQSeconds);
         setTimer(perQSeconds);
+
+        // —— seed the single total exam timer ——
+        try {
+          const sid = sessionIdRef.current;
+          if (sid) {
+            const j = await getRemaining(sid);
+
+            if (typeof j.total === "number" && j.total > 0)
+              setTotalSeconds(j.total);
+
+            let seeded = false;
+            if (typeof j.remaining === "number") {
+              setTotalTimer(Math.max(0, Math.floor(j.remaining)));
+              seeded = true;
+            } else if (j.deadlineAt) {
+              const secs = Math.max(
+                0,
+                Math.floor(
+                  (new Date(j.deadlineAt).getTime() - Date.now()) / 1000
+                )
+              );
+              setTotalTimer(secs);
+              seeded = true;
+            }
+            if (seeded) seededRef.current = true;
+          }
+        } catch {
+          /* ignore */
+        }
+
+        // ✅ Fallback ONLY if nothing was seeded from BE
+        if (!seededRef.current) {
+          const fallbackTotal =
+            typeof totalSeconds === "number" && totalSeconds > 0
+              ? totalSeconds
+              : perQSeconds * (mcq.length || 0);
+          setTotalTimer(fallbackTotal);
+          seededRef.current = true;
+        }
       } catch (e) {
         console.error("ExamPage init error:", e);
         if (!alive) return;
@@ -314,13 +421,15 @@ export default function ExamPage() {
     })();
 
     return () => {
-      // clean interval if we unmount while running
+      // clean intervals if we unmount while running
       if (timerRef.current) window.clearInterval(timerRef.current);
+      if (totalTimerRef.current) window.clearInterval(totalTimerRef.current);
     };
   }, []);
 
   /* ---------- side effects ---------- */
 
+  // Per-question countdown (existing behavior)
   useEffect(() => {
     if (finished) return;
     timerRef.current = window.setInterval(
@@ -332,7 +441,7 @@ export default function ExamPage() {
     };
   }, [finished]);
 
-  // Auto-advance when timer hits 0 (once per question)
+  // Auto-advance when per-question timer hits 0 (once per question)
   useEffect(() => {
     if (finished) return;
     if (timer === 0 && !autoSubmittedRef.current) {
@@ -345,6 +454,28 @@ export default function ExamPage() {
   useEffect(() => {
     if (timer > 0) autoSubmittedRef.current = false;
   }, [timer]);
+
+  // ✅ Session-wide countdown (hard stop)
+  useEffect(() => {
+    if (finished) return;
+    if (totalTimer == null) return;
+
+    totalTimerRef.current = window.setInterval(() => {
+      setTotalTimer((t) => (t != null && t > 0 ? t - 1 : 0));
+    }, 1000);
+
+    return () => {
+      if (totalTimerRef.current) window.clearInterval(totalTimerRef.current);
+    };
+  }, [finished, totalTimer != null]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ✅ When total time hits zero -> finalize the whole exam
+  useEffect(() => {
+    if (finished) return;
+    if (totalTimer === 0) {
+      finalizeExam({ includeCurrent: true });
+    }
+  }, [totalTimer, finished]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---------- actions ---------- */
 
@@ -383,27 +514,77 @@ export default function ExamPage() {
       },
     }));
 
-    // 3) Otherwise advance to next
+    // 2) Advance deterministically by index; finalize only after the LAST question
     setQuestionHistory((prev) => [...prev, { question, answer, timeSpentMs }]);
-    setProgress((p) => ({ ...p, index: p.index + 1 }));
     setTimer(perQuestionSeconds);
     setAnswer({});
 
-    const next = getAdaptiveNextQuestion(pool as any);
-    if (next) {
-      setQuestion(next);
-      questionStartRef.current = performance.now(); // start timer for next question
-      return;
-    }
-    await finalizeExam({ includeCurrent: false });
+    setProgress((p) => {
+      const nextIndex = p.index + 1;
+
+      // When we've just answered the last question (nextIndex === total), finalize
+      if (nextIndex >= p.total) {
+        // includeCurrent is false because we already buffered it above
+        finalizeExam({ includeCurrent: true });
+        return { ...p, index: nextIndex };
+      }
+
+      // Otherwise move to the next question by index
+      const nextQ = pool[nextIndex];
+      if (nextQ) {
+        setQuestion(nextQ);
+        questionStartRef.current = performance.now();
+
+        const L = Number(
+          (nextQ as any).numericDifficulty ?? (nextQ as any).difficulty ?? 3
+        );
+        const numeric = Math.max(1, Math.min(5, Math.round(L)));
+        const label =
+          numeric <= 1
+            ? "Very Easy"
+            : numeric === 2
+            ? "Easy"
+            : numeric === 3
+            ? "Medium"
+            : numeric === 4
+            ? "Hard"
+            : "Very Hard";
+
+        console.groupCollapsed(
+          "[Adaptive] Next Question",
+          `#${
+            (nextQ as any).id ?? "?"
+          } — ${label} (L${numeric}, ELO ${levelToElo(numeric)})`
+        );
+        console.table({
+          id: (nextQ as any).id,
+          difficultyLabel: label,
+          difficultyLevel: numeric,
+          predictedElo: levelToElo(numeric),
+          textPreview:
+            (nextQ as any).text ??
+            (nextQ as any).question_text ??
+            (nextQ as any).prompt ??
+            "n/a",
+        });
+        console.groupEnd();
+      }
+
+      return { ...p, index: nextIndex };
+    });
   }
 
   async function finalizeExam(
     opts: { includeCurrent: boolean } = { includeCurrent: true }
   ) {
+    // avoid double finalize
+    if (movingRef.current) return;
+    movingRef.current = true;
+
     const sessionId = sessionIdRef.current;
     if (!sessionId) {
       alert("Missing session id.");
+      movingRef.current = false;
       return;
     }
 
@@ -433,7 +614,9 @@ export default function ExamPage() {
 
     const { answers } = buildBulkPayload(sessionId, map);
     if (answers.length === 0) {
-      alert("No answers to submit.");
+      // Even if empty, mark finished to end the UI flow
+      setFinished(true);
+      movingRef.current = false;
       return;
     }
 
@@ -448,6 +631,11 @@ export default function ExamPage() {
     } catch (e) {
       console.error("submitExam failed:", e);
       alert("Failed to submit exam. Please try again.");
+    } finally {
+      movingRef.current = false;
+      // stop timers
+      if (timerRef.current) window.clearInterval(timerRef.current);
+      if (totalTimerRef.current) window.clearInterval(totalTimerRef.current);
     }
   }
 
@@ -627,33 +815,68 @@ export default function ExamPage() {
               </div>
             </div>
 
-            {/* Timer */}
-            <div
-              className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl font-semibold text-base sm:text-lg transition-all duration-300 ${
-                timer <= 10
-                  ? "bg-gradient-to-r from-red-100 to-red-200 text-red-700 border border-red-300"
-                  : timer <= 30
-                  ? "bg-gradient-to-r from-orange-100 to-orange-200 text-orange-700 border border-orange-300"
-                  : "bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 border border-slate-300"
-              }`}
-            >
-              <div className="flex items-center">
-                <svg
-                  className="w-4 h-4 sm:w-5 sm:h-5 mr-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
+            {/* Timers */}
+            <div className="flex items-center gap-2">
+              {/* Total exam timer */}
+              {(totalTimer != null ||
+                (typeof totalSeconds === "number" && totalSeconds > 0)) && (
+                <div className="px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl font-semibold text-base sm:text-lg bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 border border-slate-300">
+                  <div className="flex items-center">
+                    <svg
+                      className="w-4 h-4 sm:w-5 sm:h-5 mr-2"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                      />
+                    </svg>
+                    Total&nbsp;
+                    {fmt(
+                      typeof totalTimer === "number"
+                        ? totalTimer
+                        : typeof totalSeconds === "number" && totalSeconds > 0
+                        ? totalSeconds
+                        : 0
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Per-question timer (existing; disabled visually) */}
+              {false && (
+                <div
+                  className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl font-semibold text-base sm:text-lg transition-all duration-300 ${
+                    timer <= 10
+                      ? "bg-gradient-to-r from-red-100 to-red-200 text-red-700 border border-red-300"
+                      : timer <= 30
+                      ? "bg-gradient-to-r from-orange-100 to-orange-200 text-orange-700 border border-orange-300"
+                      : "bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 border border-slate-300"
+                  }`}
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
-                {Math.floor(timer / 60)}:
-                {(timer % 60).toString().padStart(2, "0")}
-              </div>
+                  <div className="flex items-center">
+                    <svg
+                      className="w-4 h-4 sm:w-5 sm:h-5 mr-2"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                      />
+                    </svg>
+                    {Math.floor(timer / 60)}:
+                    {(timer % 60).toString().padStart(2, "0")}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

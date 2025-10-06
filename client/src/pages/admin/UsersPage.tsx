@@ -4,7 +4,7 @@ import {
   getUsers,
   updateUserRole,
   removeUser,
-  createUser,           // make sure this is exported from services/userService
+  createUser, // make sure this is exported from services/userService
   type User,
   type Role,
 } from "../../services/userService";
@@ -42,7 +42,12 @@ function RoleSelect({
         className="w-full rounded-md border border-slate-300/80 bg-white px-3 py-2 text-sm text-slate-800 flex items-center justify-between focus:outline-none focus:ring-2 focus:ring-slate-500/40 focus:border-slate-400"
       >
         <span className="capitalize">{value}</span>
-        <svg className="h-4 w-4 text-slate-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <svg
+          className="h-4 w-4 text-slate-500"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
           <path
             fillRule="evenodd"
             d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 011.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z"
@@ -112,7 +117,12 @@ export default function UsersPage() {
     if (!canCreate || saving) return;
     try {
       setSaving(true);
-      await createUser({ name: name.trim(), email: email.trim(), password, role });
+      await createUser({
+        name: name.trim(),
+        email: email.trim(),
+        password,
+        role,
+      });
       setName("");
       setEmail("");
       setPassword("");
@@ -127,7 +137,9 @@ export default function UsersPage() {
 
   async function handleRoleChange(id: number, newRole: Role) {
     const prev = users;
-    setUsers((arr) => arr.map((u) => (u.id === id ? { ...u, role: newRole } : u))); // optimistic
+    setUsers((arr) =>
+      arr.map((u) => (u.id === id ? { ...u, role: newRole } : u))
+    ); // optimistic
     try {
       await updateUserRole(id, newRole);
     } catch (e: any) {
@@ -151,7 +163,9 @@ export default function UsersPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold text-slate-900">User Management</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">
+          User Management
+        </h1>
         <div className="hidden sm:flex items-center gap-2 text-sm text-slate-600">
           <span className="h-2 w-2 rounded-full bg-[#ff7a59]" />
           <span>Admin tools</span>
@@ -170,7 +184,9 @@ export default function UsersPage() {
 
           <div className="mt-3 grid grid-cols-1 gap-3">
             <div>
-              <label className="block text-sm font-medium text-slate-700">Name</label>
+              <label className="block text-sm font-medium text-slate-700">
+                Name
+              </label>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -178,7 +194,9 @@ export default function UsersPage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700">Email</label>
+              <label className="block text-sm font-medium text-slate-700">
+                Email
+              </label>
               <input
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -187,7 +205,9 @@ export default function UsersPage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700">Password</label>
+              <label className="block text-sm font-medium text-slate-700">
+                Password
+              </label>
               <input
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -197,7 +217,9 @@ export default function UsersPage() {
               <p className="text-xs text-slate-500 mt-1">Min 6 characters.</p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700">Role</label>
+              <label className="block text-sm font-medium text-slate-700">
+                Role
+              </label>
               <RoleSelect value={role} onChange={setRole} className="mt-1" />
             </div>
           </div>
@@ -207,9 +229,14 @@ export default function UsersPage() {
             disabled={!canCreate || saving}
             className="mt-4 w-full rounded-md bg-[#ff7a59] px-4 py-2 text-white text-sm font-medium hover:brightness-110 shadow disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {saving ? <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Creating…</span> : "Add User"}
+            {saving ? (
+              <span className="inline-flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" /> Creating…
+              </span>
+            ) : (
+              "Add User"
+            )}
           </button>
-          
         </div>
 
         {/* Users List */}
@@ -223,7 +250,9 @@ export default function UsersPage() {
           )}
 
           {error && (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700">{error}</div>
+            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700">
+              {error}
+            </div>
           )}
 
           {!loading && !error && users.length === 0 && (
@@ -232,37 +261,43 @@ export default function UsersPage() {
             </div>
           )}
 
-          {!loading && !error && users.map((u) => (
-            <div
-              key={u.id}
-              className="rounded-xl border border-slate-200/70 bg-white p-5 shadow-sm flex items-center justify-between hover:shadow transition-shadow"
-            >
-              <div className="min-w-0">
-                <p className="font-medium text-slate-900 truncate">{u.name ?? "—"}</p>
-                <p className="text-sm text-slate-600 truncate">
-                  {u.email} · {u.role}
-                </p>
-                {"emailVerified" in u && (
-                  <p className="text-xs text-slate-500">
-                    {u.emailVerified ? "Verified" : "Unverified"}
-                    {u.lastLoginAt ? ` · Last login: ${u.lastLoginAt}` : ""}
-                    {u.disabled ? " · Disabled" : ""}
+          {!loading &&
+            !error &&
+            users.map((u) => (
+              <div
+                key={u.id}
+                className="rounded-xl border border-slate-200/70 bg-white p-5 shadow-sm flex items-center justify-between hover:shadow transition-shadow"
+              >
+                <div className="min-w-0">
+                  <p className="font-medium text-slate-900 truncate">
+                    {u.name ?? "—"}
                   </p>
-                )}
-              </div>
+                  <p className="text-sm text-slate-600 truncate">
+                    {u.email} · {u.role}
+                  </p>
+                  {"emailVerified" in u && (
+                    <p className="text-xs text-slate-500">
+                      {u.lastLoginAt ? ` · Last login: ${u.lastLoginAt}` : ""}
+                      {u.disabled ? " · Disabled" : ""}
+                    </p>
+                  )}
+                </div>
 
-              <div className="flex items-center gap-2">
-                <RoleSelect value={u.role} onChange={(r) => handleRoleChange(u.id, r)} />
-                <button
-                  onClick={() => handleDelete(u.id)}
-                  className="inline-flex items-center gap-1 rounded-md border border-slate-300/70 px-3 py-2 text-sm hover:bg-slate-50"
-                >
-                  <Trash2 className="h-4 w-4 text-slate-600" />
-                  <span>Delete</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <RoleSelect
+                    value={u.role}
+                    onChange={(r) => handleRoleChange(u.id, r)}
+                  />
+                  <button
+                    onClick={() => handleDelete(u.id)}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-300/70 px-3 py-2 text-sm hover:bg-slate-50"
+                  >
+                    <Trash2 className="h-4 w-4 text-slate-600" />
+                    <span>Delete</span>
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
         </div>
       </div>
     </div>

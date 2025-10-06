@@ -14,7 +14,6 @@ export type AttemptItem = {
 };
 
 export type AttemptRecord = {
-  // Keep string here because various backends return text ids; the UI treats it as a label.
   attemptId: string;
   candidate: string;
   assignmentId?: string;
@@ -51,11 +50,15 @@ function coerceNumericId(payload: any): number {
     payload?.id ??
     payload?.data?.attemptId ??
     payload?.data?.sessionId ??
-    payload?.data?.id;
+    payload?.data?.id ??
+    payload?.data2?.attemptId ??
+    payload?.data2?.sessionId ??
+    payload?.data2?.id ??
+    payload?.session_id ??
+    payload?.attempt_id;
 
-  const n = Number(raw);
+  const n = Number(String(raw).trim());
   if (!Number.isFinite(n) || n <= 0) {
-    // eslint-disable-next-line no-console
     console.warn("[examService] Could not coerce a numeric id from:", payload);
     throw new Error("Server did not return a valid attempt/session id.");
   }
@@ -80,7 +83,6 @@ function sanitizeTopics(input?: string[] | string): string[] | undefined {
 export async function getAttempts(): Promise<AttemptRecord[]> {
   try {
     const rows = await request<any[]>("/attempts/mine");
-    // Normalize a variety of shapes into AttemptRecord
     return (Array.isArray(rows) ? rows : []).map((r) => {
       const attemptId =
         (r as any).attemptId ?? (r as any).sessionId ?? (r as any).id ?? "";
@@ -105,7 +107,6 @@ export async function getAttempts(): Promise<AttemptRecord[]> {
       } as AttemptRecord;
     });
   } catch {
-    // Best-effort fallback to sessions if present; adapt shape
     try {
       const sessions = await request<any[]>("/sessions/mine");
       return (Array.isArray(sessions) ? sessions : []).map(
@@ -176,10 +177,26 @@ export async function getAssignmentCompletion(
   }
 }
 
+/* --------- start attempt + timer meta (no client-side defaults) --------- */
+
+type StartResponseMaybeMeta = {
+  // many backends return extra meta; we capture if present
+  attemptId?: number | string;
+  sessionId?: number | string;
+  id?: number | string;
+  timeRemainingSeconds?: number;
+  deadlineAt?: string;
+};
+
+const _startMetaCache: Record<
+  number,
+  { timeRemainingSeconds?: number; deadlineAt?: string }
+> = {};
+
 /**
  * Start attempt — server enforces one-attempt policy and returns a numeric id.
- * NOTE: We default to NOT sending topics unless caller provides non-placeholder topics,
- * to avoid over-filtering to 0 questions.
+ * NOTE: does NOT inject any client-side default durations.
+ * Return type remains number to avoid breaking callers.
  */
 export async function startAttempt(ctx?: {
   assignmentId?: string | number; // accepted but converted to testId when numeric
@@ -206,12 +223,12 @@ export async function startAttempt(ctx?: {
   const topics = sanitizeTopics(ctx?.topics);
   if (topics && topics.length) body.topics = topics;
 
-  // limit: clamp 1..100 (server default 10)
+  // limit: clamp 1..100 (server default handles final cap)
   if (typeof ctx?.limit === "number" && Number.isFinite(ctx.limit)) {
     body.limit = Math.max(1, Math.min(100, Math.floor(ctx.limit)));
   }
 
-  // durationSeconds: optional, positive integer
+  // durationSeconds: optional, positive integer — we send it only if caller explicitly provides it.
   if (
     typeof ctx?.durationSeconds === "number" &&
     Number.isFinite(ctx.durationSeconds) &&
@@ -221,30 +238,92 @@ export async function startAttempt(ctx?: {
   }
 
   // POST /start (request() adds Authorization header and base /api)
-  try {
-    const res = await request<any>("/start", { method: "POST", body } as any);
-    return coerceNumericId(res);
-  } catch (err: any) {
-    const msg = String(
-      err?.message ||
-        err?.payload?.error ||
-        err?.payload?.message ||
-        "Failed to start exam"
-    );
+  const res = (await request<StartResponseMaybeMeta>("/start", {
+    method: "POST",
+    body,
+  } as any)) as StartResponseMaybeMeta;
 
-    if (/no published questions|no approved mcq|no questions/i.test(msg)) {
-      throw new Error(
-        "No published questions available for the requested criteria."
-      );
-    }
-    if (/missing.*test|invalid.*test/i.test(msg)) {
-      throw new Error("Missing or invalid test/assignment id.");
-    }
-    if (/unauth|token|expired|forbidden|authorization/i.test(msg)) {
-      throw new Error("Authentication required — please sign in again.");
-    }
-    throw new Error(msg);
+  // Pull id as before
+  const id = coerceNumericId(res);
+
+  // If server returned timer meta, cache it for the page to read without changing signatures.
+  const tr =
+    typeof res.timeRemainingSeconds === "number"
+      ? res.timeRemainingSeconds
+      : undefined;
+  const da = res.deadlineAt ?? undefined;
+  if (tr !== undefined || da !== undefined) {
+    _startMetaCache[id] = {
+      timeRemainingSeconds: tr,
+      deadlineAt: da,
+    };
   }
+  const tt =
+    typeof (res as any).totalTimeSeconds === "number"
+      ? (res as any).totalTimeSeconds
+      : typeof (res as any).total_time_seconds === "number"
+      ? (res as any).total_time_seconds
+      : undefined;
+
+  if (tr !== undefined || da !== undefined || tt !== undefined) {
+    _startMetaCache[id] = {
+      timeRemainingSeconds: tr,
+      deadlineAt: da,
+      totalSeconds: tt ?? tr ?? undefined, // fallback to tr at t=0
+    } as any;
+  }
+
+  return id;
+}
+
+/**
+ * Optional: lets the page read whatever meta the server returned from startAttempt
+ * (without changing startAttempt's return type).
+ */
+export function getLastStartMeta(sessionId: number) {
+  return _startMetaCache[sessionId];
+}
+
+type RemainingAPI = {
+  // BE may send number or string; some builds nest total under session
+  remaining?: number | string | null;
+  deadlineAt?: string | null;
+  finished?: boolean | null;
+  total?: number | string | null;
+  total_time_seconds?: number | string | null;
+  session?: { total_time_seconds?: number | string | null } | null;
+};
+
+const toNum = (v: unknown): number | null =>
+  v == null
+    ? null
+    : typeof v === "number"
+    ? v
+    : typeof v === "string" && isFinite(+v)
+    ? +v
+    : null;
+
+/** Get server-backed remaining time + total session time. Auth required. */
+export async function getRemaining(sessionId: number): Promise<{
+  remaining: number | null;
+  deadlineAt: string | null;
+  finished: boolean;
+  total: number | null;
+}> {
+  // uses the same authenticated helper as other endpoints
+  const j = await request<RemainingAPI>(`/sessions/${sessionId}/remaining`, {
+    method: "GET",
+  });
+
+  const rawTotal =
+    j.total ?? j.total_time_seconds ?? j.session?.total_time_seconds ?? null;
+
+  return {
+    remaining: toNum(j.remaining),
+    deadlineAt: j.deadlineAt ?? null,
+    finished: Boolean(j.finished),
+    total: toNum(rawTotal),
+  };
 }
 
 /** End/submit attempt — calls your POST /submit route with { attemptId } */

@@ -1,4 +1,5 @@
-// client/src/services/analyticsService.ts
+// client/src/services/analytics.ts
+import { request } from "../lib/api";
 import {
   getResults,
   getAttempts,
@@ -9,7 +10,9 @@ import { getQuestions } from "./questionService";
 
 /** --- PUBLIC: Summary KPIs for a given topic --- */
 export async function getAnalyticsSummary(topic: string) {
-  const t = String(topic ?? "").trim();
+  const qs = new URLSearchParams();
+  const t = (topic ?? "").trim();
+  if (t) qs.set("topic", t);
   if (!t) {
     // Safe empty summary if no topic provided
     return {
@@ -29,8 +32,9 @@ export async function getAnalyticsSummary(topic: string) {
 
   const candidates = new Set(results.map((r) => r.candidate)).size;
   const exams = results.length;
-  const avgScore =
-    exams ? Math.round(results.reduce((a, b) => a + (b.score || 0), 0) / exams) : 0;
+  const avgScore = exams
+    ? Math.round(results.reduce((a, b) => a + (b.score || 0), 0) / exams)
+    : 0;
 
   // Synthetic timeline for the summary widget
   const timeline = Array.from({ length: 7 }).map((_, i) => ({
@@ -55,10 +59,14 @@ export type AnalyticsFilters = {
   candidate?: string;
   topic?: string;
   difficulty?: "Very Easy" | "Easy" | "Medium" | "Hard" | "Very Hard";
+  candidateId?: number;
 };
 
 /** --- PUBLIC: Full analytics for a given topic --- */
-export async function getAnalyticsDetails(topic: string, filters: AnalyticsFilters = {}) {
+export async function getAnalyticsDetails(
+  topic: string,
+  filters: AnalyticsFilters = {}
+) {
   const t = String(topic ?? "").trim();
 
   // Async server calls
@@ -69,12 +77,15 @@ export async function getAnalyticsDetails(topic: string, filters: AnalyticsFilte
   const { items } = filterAttempts(allAttempts, filters);
 
   // 🔹 topic is for questions-backed KPIs (count by topic)
-  const questions = t ? await getQuestions({ topic: t, limit: 1000, offset: 0 }) : [];
+  const questions = t
+    ? await getQuestions({ topic: t, limit: 1000, offset: 0 })
+    : [];
 
   const candidates = new Set(results.map((r) => r.candidate)).size;
   const exams = results.length;
-  const avgScore =
-    exams ? Math.round(results.reduce((a, b) => a + (b.score || 0), 0) / exams) : 0;
+  const avgScore = exams
+    ? Math.round(results.reduce((a, b) => a + (b.score || 0), 0) / exams)
+    : 0;
 
   const timeline = computeTimeline(results);
   const byDifficulty = computeByDifficulty(items);
@@ -103,7 +114,10 @@ export async function getAnalyticsDetails(topic: string, filters: AnalyticsFilte
     }));
 
   const timeHistogram = computeTimeHistogram(items);
-  const candidateProgression = computeCandidateProgression(results, filters.candidate);
+  const candidateProgression = computeCandidateProgression(
+    results,
+    filters.candidate
+  );
 
   return {
     kpis: { candidates, exams, avgScore, questions: questions.length ?? 0 },
@@ -171,7 +185,9 @@ function computeTimeline(results: Result[]) {
   }));
 }
 
-function computeByDifficulty(items: ReturnType<typeof filterAttempts>["items"]) {
+function computeByDifficulty(
+  items: ReturnType<typeof filterAttempts>["items"]
+) {
   const order: Array<"Very Easy" | "Easy" | "Medium" | "Hard" | "Very Hard"> = [
     "Very Easy",
     "Easy",
@@ -181,12 +197,16 @@ function computeByDifficulty(items: ReturnType<typeof filterAttempts>["items"]) 
   ];
   return order.map((label) => {
     const s = items.filter((i) => i.difficulty === label);
-    const accuracy = s.length ? Math.round((s.filter((i) => i.correct).length / s.length) * 100) : 0;
+    const accuracy = s.length
+      ? Math.round((s.filter((i) => i.correct).length / s.length) * 100)
+      : 0;
     return { label, score: accuracy };
   });
 }
 
-function computeDifficultyCounts(items: ReturnType<typeof filterAttempts>["items"]) {
+function computeDifficultyCounts(
+  items: ReturnType<typeof filterAttempts>["items"]
+) {
   const order: Array<"Very Easy" | "Easy" | "Medium" | "Hard" | "Very Hard"> = [
     "Very Easy",
     "Easy",
@@ -207,7 +227,12 @@ function computetopicStats(items: ReturnType<typeof filterAttempts>["items"]) {
   > = {};
   for (const item of items) {
     const key = String(item.topic ?? "—");
-    const bucket = bytopic[key] ?? { correct: 0, total: 0, timeMs: 0, count: 0 };
+    const bucket = bytopic[key] ?? {
+      correct: 0,
+      total: 0,
+      timeMs: 0,
+      count: 0,
+    };
     bucket.correct += item.correct ? 1 : 0;
     bucket.total += 1;
     bucket.timeMs += item.timeSpentMs;
@@ -223,7 +248,9 @@ function computetopicStats(items: ReturnType<typeof filterAttempts>["items"]) {
   return rows;
 }
 
-function computeTimeHistogram(items: ReturnType<typeof filterAttempts>["items"]) {
+function computeTimeHistogram(
+  items: ReturnType<typeof filterAttempts>["items"]
+) {
   const buckets = [10, 20, 30, 45, 60]; // seconds thresholds; last is 60+
   const counts = new Array(buckets.length + 1).fill(0);
   for (const i of items) {
@@ -254,4 +281,30 @@ export async function getCandidates(): Promise<string[]> {
   const fromAttempts = new Set(attempts.map((a) => a.candidate));
   const all = new Set<string>([...fromResults, ...fromAttempts]);
   return Array.from(all).filter(Boolean).sort();
+}
+
+export type AnalyticsOverview = {
+  candidates: number;
+  examsTaken: number;
+  avgScore: number;
+  questions: number;
+  performanceOverTime: Array<{ label: string; score: number }>;
+  scoresByDifficulty: Array<{ difficulty: string; accuracy_pct: number }>;
+  topicInsights: Array<{ topic: string; accuracy_pct: number }>;
+  /** histogram buckets: ≤30s, 31–60s, 61–90s, 91–120s, 120s+ */
+  timeSpentSeconds: number[];
+};
+
+export async function getAnalyticsOverview(
+  filters: AnalyticsFilters = {}
+): Promise<AnalyticsOverview> {
+  const params = new URLSearchParams();
+  if (filters.candidateId != null)
+    params.set("candidateId", String(filters.candidateId));
+  if (filters.topic) params.set("topic", filters.topic);
+  if (filters.difficulty) params.set("difficulty", filters.difficulty);
+
+  const qs = params.toString();
+  const path = qs ? `/analytics/overview?${qs}` : "/analytics/overview";
+  return await request<AnalyticsOverview>(path);
 }

@@ -5,6 +5,6 @@ import { getOverview } from "../controllers/analyticsController";
 const router = Router();
 
 // Main overview endpoint used by the FE
-router.get("/overview", getOverview);
+router.get("/analytics/overview", getOverview);
 
 export default router;

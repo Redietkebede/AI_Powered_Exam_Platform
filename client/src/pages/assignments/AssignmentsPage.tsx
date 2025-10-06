@@ -264,7 +264,7 @@ export default function AssignmentsPage() {
       config: {
         topic,
         count: config.questionCount,
-        // optionally: time limit/types if BE uses them
+        timeLimitMinutes: Number(config.timeLimitMinutes ?? 0),
       },
       schedule,
     };
@@ -487,15 +487,6 @@ export default function AssignmentsPage() {
                         }`}
                       >
                         <span>{s}</span>
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-[10px] ${
-                            active
-                              ? "bg-[#ff7a59]/20 text-[#0f2744]"
-                              : "bg-[#0f2744]/10 text-[#0f2744]"
-                          }`}
-                        >
-                          {count}
-                        </span>
                       </button>
                     );
                   })}

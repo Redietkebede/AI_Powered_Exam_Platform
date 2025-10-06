@@ -44,12 +44,6 @@ export async function submitExam(dto: BulkAnswerDTO): Promise<SubmitSummary> {
   return request<SubmitSummary>("/submit", { method: "POST", body: dto });
 }
 
-// (optional) keep a dedicated bulk path only if your BE has it
-export async function submitAnswersBulk(
-  dto: BulkAnswerDTO
-): Promise<{ ok: true }> {
-  return request<{ ok: true }>("/answers/bulk", { method: "POST", body: dto });
-}
 
 // add to answers service
 export async function getSessionAnswers(

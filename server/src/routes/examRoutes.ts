@@ -15,7 +15,7 @@ import {
   getRemaining,
 } from "../controllers/examController";
 
-const router = express.Router();
+const   router = express.Router();
 router.use(verifyToken);
 
 router.post("/start", verifyToken, startExam);

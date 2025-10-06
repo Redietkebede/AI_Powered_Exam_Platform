@@ -172,13 +172,7 @@ export default function QuestionBankPage() {
           </button>
 
           <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-gray-400" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search questions"
-              className="w-64 rounded-md border border-gray-300 pl-8 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
-            />
+            
           </div>
           <button
             onClick={() => {
@@ -205,47 +199,7 @@ export default function QuestionBankPage() {
         </div>
       )}
 
-      {/* Topic-level filters toolbar */}
-      <div className="-mx-6 border-y border-gray-200 bg-white/70 px-6 py-3 backdrop-blur">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="inline-flex items-center gap-2 text-sm font-medium text-[#0f2744]">
-            <Filter className="h-4 w-4" /> Topic Filters
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => setShowFilters(true)} className="inline-flex items-center gap-2 rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50">
-              <Filter className="h-4 w-4" /> Filter Topics
-            </button>
-            <button
-              onClick={() => {
-                setSearch('')
-                setTopic('')
-                settopicQuery('')
-                setShowAlltopics(false)
-                setExpandedtopics(new Set())
-                setTopicFilters({})
-              }}
-              className="inline-flex items-center gap-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
-            >
-              <X className="h-4 w-4" /> Clear all
-            </button>
-          </div>
-        </div>
-
-        {(topic || search) && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {search && (
-              <button onClick={() => setSearch('')} className="group inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100">
-                Search: "{search}" <X className="h-3.5 w-3.5 text-gray-500 group-hover:text-gray-700" />
-              </button>
-            )}
-            {topic !== '' && (
-              <button onClick={() => setTopic('')} className="group inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100">
-                Topic: {topic} <X className="h-3.5 w-3.5 text-gray-500 group-hover:text-gray-700" />
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+    
 
       {/* Grouped Questions by topic */}
       <div className="space-y-6">

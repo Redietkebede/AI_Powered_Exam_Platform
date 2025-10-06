@@ -45,7 +45,7 @@ export function mapDbRowToQuestion(row: DbQuestionRow): Question {
   const status: Question["status"] =
     row.status === "published" ? "approved"
     : row.status === "archived" ? "rejected"
-    : "pending";
+    : "draft";
 
   const q: Question = {
     id: row.id,

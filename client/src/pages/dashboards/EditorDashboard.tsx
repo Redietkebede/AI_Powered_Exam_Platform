@@ -1,15 +1,47 @@
 // client/src/pages/dashboards/EditorDashboard.tsx
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { getQuestions } from "../../services/questionService";
 import type { Question } from "../../types/question";
+import { getActivityFeed, type ActivityItem } from "../../services/activity";
+
+type Counts = {
+  pending: number;
+  approved: number;
+  rejected: number;
+};
 
 export default function EditorDashboard() {
-  const [questions, setQuestions] = useState<Question[]>([]);
   const [topic, setTopic] = useState<string>("");
   const [difficulty, setDifficulty] = useState<number>(3); // 1..5
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [recent, setRecent] = useState<ActivityItem[]>([]);
+
+  // we keep a small sample list just in case you want to show a preview later
+  const [sampleQuestions, setSampleQuestions] = useState<Question[]>([]);
+  const [counts, setCounts] = useState<Counts>({
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+  });
+
+  // load editor-scoped activity
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const items = await getActivityFeed("editor", {
+          sinceDays: 30,
+          limit: 50,
+        });
+        if (alive) setRecent(items);
+      } catch {}
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -20,26 +52,114 @@ export default function EditorDashboard() {
     }
     setErr(null);
     setLoading(true);
+
     try {
-      const qs = await getQuestions({ topic: t, difficulty });
-      setQuestions(qs ?? []);
+      // 1) Try status-scoped fetches first (preferred)
+      const [pendingRes, draftRes, approvedRes, rejectedRes] =
+        await Promise.all([
+          getQuestions({ topic: t, difficulty, status: "pending" }).catch(
+            () => [] as Question[]
+          ),
+          getQuestions({ topic: t, difficulty, status: "draft" }).catch(
+            () => [] as Question[]
+          ),
+          // API uses "published" for approved questions
+          getQuestions({ topic: t, difficulty, status: "published" }).catch(
+            () => [] as Question[]
+          ),
+          getQuestions({ topic: t, difficulty, status: "rejected" }).catch(
+            () => [] as Question[]
+          ),
+        ]);
+
+      // 2) If the API didn’t support a status, fall back to a blended fetch and count by q.status
+      let fallbackAll: Question[] = [];
+      if (
+        pendingRes.length +
+          draftRes.length +
+          approvedRes.length +
+          rejectedRes.length ===
+        0
+      ) {
+        fallbackAll =
+          (await getQuestions({ topic: t, difficulty }).catch(
+            () => [] as Question[]
+          )) ?? [];
+      }
+
+      const pendingCount =
+        pendingRes.length ||
+        draftRes.length ||
+        fallbackAll.filter(
+          (q: any) =>
+            q.status === "pending" ||
+            q.status === "draft" ||
+            q.state === "pending" ||
+            q.state === "draft"
+        ).length;
+
+      const approvedCount =
+        approvedRes.length ||
+        fallbackAll.filter(
+          (q: any) =>
+            q.status === "approved" ||
+            q.status === "published" ||
+            q.state === "approved" ||
+            q.state === "published"
+        ).length;
+
+      const rejectedCount =
+        rejectedRes.length ||
+        fallbackAll.filter(
+          (q: any) => q.status === "rejected" || q.state === "rejected"
+        ).length;
+
+      setCounts({
+        pending: pendingCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
+      });
+
+      // keep a small sample so the page could later show a preview if needed
+      setSampleQuestions(
+        approvedRes.slice(0, 10).length > 0
+          ? approvedRes.slice(0, 10)
+          : fallbackAll.slice(0, 10) ?? []
+      );
     } catch (e: any) {
-      setQuestions([]);
+      setCounts({ pending: 0, approved: 0, rejected: 0 });
+      setSampleQuestions([]);
       setErr(e?.message ?? "Failed to load questions");
-      // Optional: console.error("getQuestions failed:", e?.status, e?.message, e?.payload ?? e);
     } finally {
       setLoading(false);
     }
   }
 
-  const counts = useMemo(
-    () => ({
-      pending: questions.filter((q) => q.status === "pending").length,
-      draft: questions.filter((q) => q.status === "draft").length,
-      approved: questions.filter((q) => q.status === "approved").length,
-      rejected: questions.filter((q) => q.status === "rejected").length,
-    }),
-    [questions]
+  const cards = useMemo(
+    () => [
+      {
+        label: "Pending",
+        value: counts.pending,
+        toneBg: "bg-amber-50",
+        toneBorder: "border-amber-200",
+        toneText: "text-amber-700",
+      },
+      {
+        label: "Approved",
+        value: counts.approved,
+        toneBg: "bg-emerald-50",
+        toneBorder: "border-emerald-200",
+        toneText: "text-emerald-700",
+      },
+      {
+        label: "Rejected",
+        value: counts.rejected,
+        toneBg: "bg-rose-50",
+        toneBorder: "border-rose-200",
+        toneText: "text-rose-700",
+      },
+    ],
+    [counts]
   );
 
   return (
@@ -75,7 +195,10 @@ export default function EditorDashboard() {
         </div>
 
         {/* Query form (topic + difficulty) */}
-        <form onSubmit={onSubmit} className="mt-4 flex flex-wrap items-end gap-3">
+        <form
+          onSubmit={onSubmit}
+          className="mt-4 flex flex-wrap items-end gap-3"
+        >
           <div className="flex flex-col">
             <label className="text-xs text-gray-600 mb-1">Topic</label>
             <input
@@ -87,7 +210,9 @@ export default function EditorDashboard() {
           </div>
 
           <div className="flex flex-col">
-            <label className="text-xs text-gray-600 mb-1">Difficulty (1–5)</label>
+            <label className="text-xs text-gray-600 mb-1">
+              Difficulty (1–5)
+            </label>
             <input
               type="number"
               min={1}
@@ -95,7 +220,9 @@ export default function EditorDashboard() {
               value={difficulty}
               onChange={(e) => {
                 const n = Number(e.target.value);
-                setDifficulty(Number.isFinite(n) ? Math.min(5, Math.max(1, n)) : 3);
+                setDifficulty(
+                  Number.isFinite(n) ? Math.min(5, Math.max(1, n)) : 3
+                );
               }}
               className="border border-gray-300 rounded-md px-3 py-2 w-24 focus:outline-none focus:ring-2 focus:ring-[#0f2744]/30"
             />
@@ -115,39 +242,45 @@ export default function EditorDashboard() {
 
       {/* Content status */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {[
-          {
-            label: "Pending",
-            value: counts.pending,
-            tone: "bg-amber-50 text-amber-700 border-amber-200",
-          },
-          {
-            label: "Drafts",
-            value: counts.draft,
-            tone: "bg-gray-50 text-gray-700 border-gray-200",
-          },
-          {
-            label: "Approved",
-            value: counts.approved,
-            tone: "bg-emerald-50 text-emerald-700 border-emerald-200",
-          },
-          {
-            label: "Rejected",
-            value: counts.rejected,
-            tone: "bg-rose-50 text-rose-700 border-rose-200",
-          },
-        ].map((k) => (
+        {cards.map((k) => (
           <div
             key={k.label}
-            className={`rounded-lg border ${k.tone.split(" ").at(-1)} bg-white p-5 shadow-sm`}
+            className={`rounded-lg border ${k.toneBorder} bg-white p-5 shadow-sm`}
           >
-            <div className={`h-1 w-full rounded ${k.tone.split(" ")[0]}`} />
-            <div className="mt-3 text-xs text-gray-600">{k.label}</div>
+            <div className={`h-1 w-full rounded ${k.toneBg}`} />
+            <div className={`mt-3 text-xs ${k.toneText}`}>{k.label}</div>
             <div className="mt-1 text-2xl font-semibold text-[#0f2744]">
               {k.value}
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Recent Activity */}
+      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+        <h3 className="font-medium text-[#0f2744]">Recent activity</h3>
+        <ul className="mt-3 space-y-2 text-sm">
+          {recent.slice(0, 10).map((x) => (
+            <li
+              key={x.id}
+              className="flex items-center gap-3 rounded border border-gray-100 bg-gray-50 px-3 py-2"
+            >
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ background: "#ff7a59" }}
+              />
+              <span className="text-gray-800">{x.message}</span>
+              <span className="ml-auto text-xs text-gray-500">
+                {new Date(x.created_at).toLocaleString()}
+              </span>
+            </li>
+          ))}
+          {recent.length === 0 && (
+            <li className="rounded border border-dashed border-gray-200 bg-white px-3 py-6 text-center text-gray-500">
+              No recent activity.
+            </li>
+          )}
+        </ul>
       </div>
     </div>
   );

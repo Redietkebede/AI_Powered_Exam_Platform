@@ -1,12 +1,12 @@
 import { Link } from "react-router-dom";
-import { getAnalyticsDetails } from "../../services/analytics";
+import { getAnalyticsDetails,getAnalyticsOverview } from "../../services/analytics";
+import { getActivityFeed, type ActivityItem } from "../../services/activity";
 import {
   Users,
   Activity,
   Trophy,
   ClipboardList,
   ArrowRight,
-  Settings2,
   PlusCircle,
   CalendarDays,
 } from "lucide-react";
@@ -50,20 +50,49 @@ export default function RecruiterDashboard() {
   // while keeping UI strictly the same.
   const [summary, setSummary] = useState<any>(DEFAULT_SUMMARY);
   const [loading, setLoading] = useState(true);
+  const [recent, setRecent] = useState<ActivityItem[]>([]);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
 
     (async () => {
+      // inside the initial effect where summary is loaded
       try {
-        const data = await getAnalyticsDetails("");
-        if (alive && data) setSummary(data as AnalyticsSummary);
+        const o = await getAnalyticsOverview({});
+        const s = {
+          kpis: {
+            candidates: Number(o.candidates ?? 0),
+            exams: Number(o.examsTaken ?? 0),
+            avgScore: Number(o.avgScore ?? 0),
+            questions: Number(o.questions ?? 0),
+          },
+          timeline: (o.performanceOverTime ?? []).map((r) => ({
+            label: r.label,
+            score: r.score,
+          })),
+          byDifficulty: (o.scoresByDifficulty ?? []).map((r) => ({
+            label: String(r.difficulty),
+            score: Number(r.accuracy_pct ?? 0),
+          })),
+        };
+        if (alive) setSummary(s as any);
       } catch {
         if (alive) setSummary(DEFAULT_SUMMARY);
       } finally {
         if (alive) setLoading(false);
       }
+    })();
+
+    // Load recruiter activity (last 7 days)
+    (async () => {
+      try {
+        const items = await getActivityFeed("recruiter", {
+          sinceDays: 30,
+          limit: 50,
+        });
+        if (alive) setRecent(items);
+      } catch {}
     })();
 
     // Warm up topics endpoint used by Assignments flow (no UI change).
@@ -177,47 +206,6 @@ export default function RecruiterDashboard() {
 
       {/* Quick Actions + small panels */}
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-        {(summary.recentActivity ?? [])
-          .slice(0, 5)
-          .map(
-            (a: {
-              candidate: string;
-              date: string | number | Date;
-              score: number;
-              correct: number;
-              total: number;
-            }) => (
-              <li
-                key={`${a.candidate}-${a.date}`}
-                className="rounded border border-gray-100 bg-gray-50 px-3 py-2"
-              >
-                <span className="font-medium text-[#0f2744]">
-                  {a.candidate}
-                </span>{" "}
-                scored {a.score}% ({a.correct}/{a.total}) ·{" "}
-                {new Date(a.date).toLocaleString()}
-              </li>
-            )
-          )}
-        {(summary.recentActivity ?? []).length === 0 && (
-          <li className="rounded border border-dashed border-gray-200 bg-white px-3 py-6 text-center text-gray-500">
-            No recent activity.
-          </li>
-        )}
-
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between">
-            <h3 className="font-medium text-[#0f2744]">Templates</h3>
-            <Settings2 className="h-4 w-4 text-[#0f2744]" />
-          </div>
-          <p className="mt-2 text-sm text-gray-600">
-            Save and reuse common assignment configurations.
-          </p>
-          <button className="mt-4 inline-flex items-center gap-2 rounded-md border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50">
-            Coming soon
-          </button>
-        </div>
-
         <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <h3 className="font-medium text-[#0f2744]">Schedule</h3>
@@ -239,17 +227,22 @@ export default function RecruiterDashboard() {
       <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
         <h3 className="font-medium text-[#0f2744]">Recent Activity</h3>
         <ul className="mt-3 space-y-2 text-sm text-gray-700">
-          {(summary.recentActivity ?? []).slice(0, 5).map((a: any) => (
+          {recent.slice(0, 10).map((x) => (
             <li
-              key={`${a.candidate}-${a.date}`}
-              className="rounded border border-gray-100 bg-gray-50 px-3 py-2"
+              key={x.id}
+              className="flex items-center gap-3 rounded border border-gray-100 bg-gray-50 px-3 py-2"
             >
-              <span className="font-medium text-[#0f2744]">{a.candidate}</span>{" "}
-              scored {a.score}% ({a.correct}/{a.total}) ·{" "}
-              {new Date(a.date).toLocaleString()}
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ background: "#ff7a59" }}
+              />
+              <span className="text-gray-800">{x.message}</span>
+              <span className="ml-auto text-xs text-gray-500">
+                {new Date(x.created_at).toLocaleString()}
+              </span>
             </li>
           ))}
-          {(summary.recentActivity ?? []).length === 0 && (
+          {recent.length === 0 && (
             <li className="rounded border border-dashed border-gray-200 bg-white px-3 py-6 text-center text-gray-500">
               No recent activity.
             </li>

@@ -2,14 +2,14 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import { Menu, LayoutDashboard, Users2, BookOpen, Sparkles, Timer, BarChart2, LogOut } from 'lucide-react';
 import { getCurrentUser, logout } from '../services/authService';
-import type { User } from '../services/userService';
+import type { Me } from '../services/userService';
 import logo from '../assets/logo.jpg';
 
 type Role = 'admin' | 'editor' | 'recruiter' | 'candidate';
 
 export default function DashboardLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
 
   const navigate = useNavigate();
@@ -42,7 +42,7 @@ export default function DashboardLayout() {
 
   // Allowed labels by role (edit as your policy requires)
   const allowedByRole: Record<Role, string[]> = {
-    admin: ['Dashboard', 'Question Bank', 'Create Questions', 'Approvals', 'Assignments', 'Analytics', 'User Management', 'Results'],
+    admin: ['Dashboard','User Management', 'Analytics'],
     editor: ['Dashboard', 'Question Bank', 'Create Questions', 'Approvals'],
     recruiter: ['Dashboard', 'Assignments', 'Analytics'],
     candidate: ['Dashboard', 'Results'],
@@ -131,7 +131,7 @@ export default function DashboardLayout() {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-slate-800 truncate">
-                {user?.name ?? '—'}
+                {user?.name || user?.email?.split('@')[0] || 'User'}
               </p>
               <p className="text-xs text-slate-600 capitalize">
                 {user?.role ?? '—'}

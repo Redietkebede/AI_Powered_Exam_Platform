@@ -93,7 +93,7 @@ export async function getOverview(req: Request, res: Response) {
           SELECT a.session_id,
                  SUM(CASE WHEN a.is_correct THEN 1 ELSE 0 END)::int AS correct,
                  COUNT(*)::int AS total
-          FROM exam_answers a
+          FROM answers a
           JOIN fs ON fs.id = a.session_id
           GROUP BY a.session_id
         )
@@ -120,7 +120,7 @@ export async function getOverview(req: Request, res: Response) {
         SELECT session_id,
                SUM(CASE WHEN is_correct THEN 1 ELSE 0 END)::int AS correct,
                COUNT(*)::int AS total
-        FROM exam_answers
+        FROM answers
         GROUP BY session_id
       ) a ON a.session_id = s.id
       ${where}
@@ -139,7 +139,7 @@ export async function getOverview(req: Request, res: Response) {
     const diff = await pool.query(
       `
       SELECT q.difficulty, a.is_correct
-      FROM exam_answers a
+      FROM answers a
       JOIN exam_sessions s ON s.id = a.session_id
       LEFT JOIN tests t ON t.id = s.test_id
       JOIN questions q ON q.id = a.question_id
@@ -186,7 +186,7 @@ export async function getOverview(req: Request, res: Response) {
       SELECT COALESCE(t.topic,'General') AS topic,
              SUM(CASE WHEN a.is_correct THEN 1 ELSE 0 END)::int AS correct,
              COUNT(*)::int AS total
-      FROM exam_answers a
+      FROM answers a
       JOIN exam_sessions s ON s.id = a.session_id
       LEFT JOIN tests t ON t.id = s.test_id
       JOIN questions q ON q.id = a.question_id
@@ -209,7 +209,7 @@ export async function getOverview(req: Request, res: Response) {
     const times = await pool.query(
       `
       SELECT GREATEST(1, a.time_taken_seconds)::int AS secs
-      FROM exam_answers a
+      FROM answers a
       JOIN exam_sessions s ON s.id = a.session_id
       LEFT JOIN tests t ON t.id = s.test_id
       ${where}

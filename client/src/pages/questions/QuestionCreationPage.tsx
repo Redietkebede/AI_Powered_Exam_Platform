@@ -19,7 +19,6 @@ const DEFAULT_CHOICES = ["", "", "", ""];
 export default function AiGeneratorPage() {
   // ---- AI tab state ----
   const [topic, setTopic] = useState("Algorithms");
-  const [difficulty, setDifficulty] = useState<DifficultyLabel>("Medium");
   const [count, setCount] = useState(3);
   const [loading, setLoading] = useState(false);
   const [log, setLog] = useState<string[]>([]);
@@ -182,12 +181,11 @@ export default function AiGeneratorPage() {
       return Math.min(hi, Math.max(lo, x));
     };
 
-    const diffNum = toNum(difficulty, 3, 1, 5);
     const countN = toNum(count, 5, 1, 50);
 
     setLog((l) => [
       ...l,
-      `Generating ${countN} question(s) with difficulty ${diffNum} for "${
+      `Generating ${countN} question(s) for "${
         safeTopic || "(missing topic)"
       }"...`,
     ]);
@@ -205,7 +203,6 @@ export default function AiGeneratorPage() {
       // ✅ send topic in BODY (not query)
       const res: any = await generateQuestions({
         topic: safeTopic,
-        difficulty: diffNum,
         count: countN,
       });
 
@@ -296,7 +293,7 @@ export default function AiGeneratorPage() {
             {/* topic (manual) */}
             <div className="grid gap-1.5">
               <label className="text-xs font-medium text-slate-700">
-                topic / Topic
+                Topic 
               </label>
               <input
                 value={manual.topic}
@@ -307,21 +304,6 @@ export default function AiGeneratorPage() {
                 placeholder="e.g., Algorithms"
               />
             </div>
-
-            {/* Difficulty */}
-            <div className="grid gap-1.5">
-              <label className="text-xs font-medium text-slate-700">
-                Difficulty
-              </label>
-              <Select
-                value={manual.difficulty}
-                onChange={(v) =>
-                  setManual((m) => ({ ...m, difficulty: v as DifficultyLabel }))
-                }
-                options={["Very Easy", "Easy", "Medium", "Hard", "Very Hard"]}
-              />
-            </div>
-
             {/* Type */}
             <div className="grid gap-1.5">
               <label className="text-xs font-medium text-slate-700">Type</label>
@@ -526,15 +508,6 @@ export default function AiGeneratorPage() {
             onChange={(e) => setTopic(e.target.value)}
             className="mb-3 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
             placeholder="e.g., Algorithms"
-          />
-
-          <label className="block text-xs font-medium text-slate-700 mb-1">
-            Difficulty
-          </label>
-          <Select
-            value={difficulty}
-            onChange={(v) => setDifficulty(v as DifficultyLabel)}
-            options={["Very Easy", "Easy", "Medium", "Hard", "Very Hard"]}
           />
 
           <div className="mt-3 grid gap-1.5">

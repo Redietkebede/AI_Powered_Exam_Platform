@@ -1090,18 +1090,10 @@ export const submitExam: RequestHandler = async (req, res) => {
 
   const { sessionId, answers } = (req.body ?? {}) as {
     sessionId?: number;
-    answers?: Array<{
-      questionId: number;
-      selectedIndex: number;
-      timeTakenSeconds?: number;
-    }>;
+    answers?: Array<{ questionId: number; selectedIndex: number; timeTakenSeconds?: number }>;
   };
 
-  if (
-    !Number.isInteger(sessionId) ||
-    !Array.isArray(answers) ||
-    answers.length === 0
-  ) {
+  if (!Number.isInteger(sessionId) || !Array.isArray(answers) || answers.length === 0) {
     return res.status(400).json({ error: "Invalid body" });
   }
 
@@ -1111,34 +1103,32 @@ export const submitExam: RequestHandler = async (req, res) => {
     return Number.isFinite(i) && i >= 0 && i < map.length ? map[i] : "A";
   };
 
+  // elo helper if question row has no elo_rating
+  const levelToElo = (n: number | null | undefined) => {
+    const L = Math.max(1, Math.min(5, Math.round(Number(n) || 3)));
+    return L === 1 ? 900 : L === 2 ? 1000 : L === 3 ? 1100 : L === 4 ? 1200 : 1300;
+  };
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // 1) Verify the session belongs to the caller and lock it
+    // 1) Verify and lock session
     const s = await client.query<{
-      id: number;
-      user_id: number;
-      test_id: number;
-      total_questions: number | null;
-      finished_at: Date | null;
-      correct_answer: number | null;
-      raw_score: string | number | null;
+      id: number; user_id: number; test_id: number;
+      total_questions: number | null; finished_at: Date | null;
+      correct_answer: number | null; raw_score: string | number | null;
     }>(
-      `
-      SELECT id, user_id, test_id, total_questions, finished_at, correct_answer, raw_score
-      FROM exam_sessions
-      WHERE id = $1
-      FOR UPDATE
-      `,
+      `SELECT id, user_id, test_id, total_questions, finished_at, correct_answer, raw_score
+         FROM exam_sessions
+        WHERE id = $1
+        FOR UPDATE`,
       [sessionId]
     );
-
     if (s.rowCount === 0 || Number(s.rows[0].user_id) !== userId) {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "Forbidden" });
     }
-
     if (s.rows[0].finished_at) {
       await client.query("COMMIT");
       return res.status(200).json({
@@ -1151,91 +1141,101 @@ export const submitExam: RequestHandler = async (req, res) => {
       });
     }
 
-    // 2) Validate submitted questions belong to this session
+    // 2) Validate question ids belong to this session
     const allowed = await client.query<{ question_id: number }>(
       `SELECT question_id FROM session_questions WHERE session_id = $1`,
       [sessionId]
     );
-    const allowedSet = new Set(allowed.rows.map((r) => Number(r.question_id)));
+    const allowedSet = new Set(allowed.rows.map(r => Number(r.question_id)));
 
-    const filtered = answers.filter(
-      (a) =>
-        Number.isInteger(a.questionId) &&
-        Number.isInteger(a.selectedIndex) &&
-        a.selectedIndex >= 0 &&
-        a.selectedIndex <= 3 &&
-        allowedSet.has(Number(a.questionId))
+    const filtered = answers.filter(a =>
+      Number.isInteger(a.questionId) &&
+      Number.isInteger(a.selectedIndex) &&
+      a.selectedIndex >= 0 && a.selectedIndex <= 3 &&
+      allowedSet.has(Number(a.questionId))
     );
-
     if (filtered.length === 0) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "No valid answers to submit" });
     }
 
-    // 3) Fetch the correct answers
-    const qIds = filtered.map((a) => Number(a.questionId));
-    const q = await client.query<{ id: number; correct_answer: number }>(
-      `SELECT id, correct_answer FROM questions WHERE id = ANY($1::int[])`,
+    // 3) Fetch correct answers + difficulty + elo once
+    const qIds = [...new Set(filtered.map(a => Number(a.questionId)))];
+    const qrows = await client.query<{
+      id: number;
+      correct_answer: number;   // 0..3
+      difficulty: number | null;
+      elo_rating: number | null;
+    }>(
+      `SELECT id, correct_answer, difficulty, elo_rating
+         FROM questions
+        WHERE id = ANY($1::int[])`,
       [qIds]
     );
-    const correctMap = new Map(
-      q.rows.map((r) => [Number(r.id), Number(r.correct_answer)])
-    );
+    const meta = new Map(qrows.rows.map(r => [Number(r.id), r]));
 
-    // 4) Upsert the answers
+    // 4) Upsert all answers with snapshotted difficulty/ELO
     let correctCount = 0;
-
     for (const a of filtered) {
       const qid = Number(a.questionId);
-      const cidx = correctMap.get(qid);
-      const isCorrect = typeof cidx === "number" && cidx === a.selectedIndex;
+      const m = meta.get(qid);
+
+      // sanitize meta
+      const corrIdx = Number(m?.correct_answer ?? 0);
+      const nd = Number.isFinite(m?.difficulty as number) ? (m!.difficulty as number) : 3;
+      const elo = Number.isFinite(m?.elo_rating as number) ? (m!.elo_rating as number) : levelToElo(nd);
+
+      const isCorrect = a.selectedIndex === corrIdx;
       if (isCorrect) correctCount += 1;
 
       await client.query(
         `
-        INSERT INTO answers (session_id, question_id, selected_option, correct_answer, is_correct, time_taken_sec)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO answers
+          (session_id, question_id, selected_option, correct_answer,
+           is_correct, time_taken_sec, question_difficulty, question_elo)
+        VALUES
+          ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (session_id, question_id)
         DO UPDATE SET
-          selected_option = EXCLUDED.selected_option,
-          correct_answer  = EXCLUDED.correct_answer,
-          is_correct      = EXCLUDED.is_correct,
-          time_taken_sec  = EXCLUDED.time_taken_sec
+          selected_option     = EXCLUDED.selected_option,
+          correct_answer      = EXCLUDED.correct_answer,
+          is_correct          = EXCLUDED.is_correct,
+          time_taken_sec      = EXCLUDED.time_taken_sec,
+          question_difficulty = EXCLUDED.question_difficulty,
+          question_elo        = EXCLUDED.question_elo
         `,
         [
           sessionId,
           qid,
           toLetter(a.selectedIndex),
-          toLetter(cidx ?? 0),
+          toLetter(corrIdx),
           isCorrect,
           Math.max(0, Number(a.timeTakenSeconds ?? 0)),
+          nd,        // ✅ snapshot difficulty
+          elo        // ✅ snapshot elo
         ]
       );
     }
 
-    // 5) Finalize
+    // 5) Finalize session + summary
     const totalPlanned = Number(s.rows[0].total_questions);
-    const total =
-      Number.isFinite(totalPlanned) && totalPlanned > 0
-        ? totalPlanned
-        : allowedSet.size || filtered.length;
+    const total = Number.isFinite(totalPlanned) && totalPlanned > 0
+      ? totalPlanned
+      : allowedSet.size || filtered.length;
 
     const score = total > 0 ? Math.round((correctCount / total) * 100) : 0;
 
     const fin = await client.query(
-      `
-      UPDATE exam_sessions
-         SET finished_at    = NOW(),
-             correct_answer = $2,
-             raw_score      = $3
-       WHERE id = $1
-       RETURNING id, finished_at, correct_answer, total_questions, raw_score
-      `,
+      `UPDATE exam_sessions
+          SET finished_at = NOW(),
+              correct_answer = $2,
+              raw_score = $3
+        WHERE id = $1
+        RETURNING id, finished_at, correct_answer, total_questions, raw_score`,
       [sessionId, correctCount, score]
     );
 
     await client.query("COMMIT");
-
     return res.status(200).json({
       sessionId,
       correctAnswers: fin.rows[0].correct_answer,
@@ -1251,6 +1251,7 @@ export const submitExam: RequestHandler = async (req, res) => {
     client.release();
   }
 };
+
 
 // Utility: dev-friendly error logging + safe response
 function logAnd500(res: any, where: string, err: unknown) {
@@ -1606,28 +1607,42 @@ export const getSessionQuestions: RequestHandler = async (req, res) => {
   }
 };
 
-export const getRemaining: RequestHandler = async (req, res) => {
-  try {
-    const sessionId = Number(req.params.id);
-    if (!Number.isFinite(sessionId)) {
-      return res.status(400).json({ error: "Invalid session id" });
-    }
+export const getRemaining: RequestHandler = async (req, res) =>  {
+  const sessionId = Number(req.params.id);
 
-    const { rows } = await pool.query(
-      `SELECT time_remaining_seconds, deadline_at, finished_at
-         FROM exam_sessions
-        WHERE id = $1`,
-      [sessionId]
-    );
-    if (rows.length === 0) return res.status(404).json({ error: "Not found" });
+  const { rows } = await pool.query(
+    `
+    SELECT
+      s.started_at,
+      s.finished_at,
+      s.total_time_seconds
+    FROM exam_sessions s                -- ✅ ensure it's exam_sessions
+    WHERE s.id = $1                     -- ✅ and filtering by session id
+    LIMIT 1
+    `,
+    [sessionId]
+  );
 
-    const r = rows[0];
-    res.json({
-      remaining: Math.max(0, Number(r.time_remaining_seconds ?? 0)),
-      deadlineAt: r.deadline_at,
-      finished: !!r.finished_at,
-    });
-  } catch (e: any) {
-    return res.status(500).json({ error: e?.message ?? "Server error" });
+  if (!rows[0]) return res.status(404).json({ error: "Session not found" });
+
+  const r = rows[0];
+  const startedAt = r.started_at ? new Date(r.started_at) : null;
+  const finished = !!r.finished_at;
+
+  let remaining: number | null = null;
+  let deadlineAt: string | null = null;
+
+  if (r.total_time_seconds && startedAt) {
+    const deadline = new Date(startedAt.getTime() + r.total_time_seconds * 1000);
+    deadlineAt = deadline.toISOString();
+    remaining = Math.max(0, Math.floor((deadline.getTime() - Date.now()) / 1000));
   }
-};
+
+  return res.json({
+    remaining,
+    deadlineAt,
+    finished,
+    total: r.total_time_seconds ?? null,  // ✅ return total
+  });
+}
+

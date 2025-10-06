@@ -19,27 +19,25 @@ type LegacyGenerateInput = {
   topic: string;
   count?: number | string;
   numberOfQuestions?: number | string; // legacy alias
-  difficulty?: number | string;
+  difficulty?: number | string; // ignored now
 };
 type GenerateInput = QuestionGenerateDTO | LegacyGenerateInput;
 
 /* --------------------------- List params (topic OPTIONAL) --------------------------- */
 export type ListParams = {
-  /** e.g. 'published' | 'draft' | 'archived' | UI 'approved' (mapped to 'published') */
-  status?: string;
-  /** Prefer 'topic'; omitted from query if '' */
+  status?: string; // 'published' | 'approved' | 'pending' | 'rejected' | 'draft' | 'any'
   topic?: string;
-  /** Fallback if the UI supplies 'subject' instead of 'topic' */
-  subject?: string;
-  /** Optional difficulty filter (accepts label or 1..5); omitted if empty */
-  difficulty?: string | number;
-  /** Pagination (optional) */
+  subject?: string; // legacy alias for topic
+
+  // optional – only send if BE supports; we now omit by default in callers
   limit?: number;
   offset?: number;
-  /** Optional text search (if supported by BE) */
+
   search?: string;
-  /** Optional creator filter (if supported) */
   createdBy?: number | string;
+
+  // NOTE: difficulty filter is not used by BE; keep for backward compat but don't send unless needed
+  difficulty?: number | string;
 };
 
 /* ------------------------------ Normalizers ------------------------------ */
@@ -68,10 +66,11 @@ const normalizeStatus = (s?: string): string | undefined => {
   if (!s) return undefined;
   const t = s.trim().toLowerCase();
   if (t === "approved") return "published"; // UI → DB
+  if (t === "all") return "any";
   return t;
 };
 
-/** Build a query string, skipping empty/whitespace-only params. */
+/** Build a query string WITHOUT the leading '?' */
 function buildListQuery(params: ListParams = {}): string {
   const sp = new URLSearchParams();
 
@@ -83,36 +82,37 @@ function buildListQuery(params: ListParams = {}): string {
   };
 
   // topic OR subject (prefer topic)
-  const topic = String(params.topic ?? "").trim();
-  const subject = String(params.subject ?? "").trim();
+  const topic = String(params.topic ?? "")
+    .trim()
+    .toLowerCase();
+  const subject = String(params.subject ?? "")
+    .trim()
+    .toLowerCase();
   if (topic) sp.set("topic", topic);
   else if (subject) sp.set("topic", subject);
 
-  // status (normalized); do not silently inject here—caller decides default
+  // status (normalized)
   const st = normalizeStatus(params.status);
-  if (st) sp.set("status", st);
+  if (st && st !== "any") sp.set("status", st);
 
-  // difficulty (optional) — accept label or numeric 1..5, pass as normalized number
+  // difficulty (rarely used; keep only if explicitly provided)
   if (params.difficulty !== undefined && params.difficulty !== null) {
     const dnum = toDifficultyNum(params.difficulty);
     if (dnum) sp.set("difficulty", String(Math.min(5, Math.max(1, dnum))));
-    else add("difficulty", params.difficulty);
   }
 
-  // pagination
+  // pagination (send only if the route supports them)
   if (typeof params.limit === "number" && Number.isFinite(params.limit)) {
-    sp.set("limit", String(params.limit));
+    sp.set("limit", String(Math.floor(params.limit)));
   }
   if (typeof params.offset === "number" && Number.isFinite(params.offset)) {
-    sp.set("offset", String(params.offset));
+    sp.set("offset", String(Math.floor(params.offset)));
   }
 
-  // optional search / createdBy
   add("q", params.search);
   add("createdBy", params.createdBy);
 
-  const qs = sp.toString();
-  return qs ? `?${qs}` : "";
+  return sp.toString(); // <-- no leading '?'
 }
 
 /* --------------------------- Normalizers -> DTO -------------------------- */
@@ -124,7 +124,7 @@ function toCreateDTO(input: CreateInput): QuestionCreateDTO {
       options: (dto.options ?? []).map(String),
       correct_answer: Number(dto.correct_answer),
       difficulty: Number(dto.difficulty),
-      //tags: Array.isArray(dto.tags) ? dto.tags.map(String) : undefined,
+      // tags omitted intentionally; BE assigns/handles arrays
     };
   }
   const legacy = input as LegacyCreateInput;
@@ -142,19 +142,13 @@ function toCreateDTO(input: CreateInput): QuestionCreateDTO {
     options,
     correct_answer: correct,
     difficulty: toDifficultyNum(legacy.difficulty) ?? 3,
-    //tags: Array.isArray(legacy.tags) ? legacy.tags.map(String) : undefined,
   };
 }
 
-/** STRICT to BE schema: body must be { topic, difficulty:1..5, count:1..50 } */
+/** STRICT to BE schema: (legacy difficulty ignored) */
 function toGenerateDTO(input: GenerateInput): QuestionGenerateDTO {
   const topic = String((input as any).topic ?? "").trim();
   if (topic.length < 2) throw new Error("Topic must be at least 2 characters");
-
-  const diffNum = Math.min(
-    5,
-    Math.max(1, toDifficultyNum((input as any).difficulty) ?? 3)
-  );
 
   const countRaw =
     (input as any).count ?? (input as any).numberOfQuestions ?? 5;
@@ -162,28 +156,21 @@ function toGenerateDTO(input: GenerateInput): QuestionGenerateDTO {
 
   const dto: QuestionGenerateDTO = {
     topic,
-    difficulty: diffNum,
+    // difficulty removed from payload – BE assigns levels
+    difficulty: 3, // placeholder for type compatibility, BE ignores it
     count: countNum,
   };
   return dto;
 }
 
-/** When you want counts in other places */
-export type TopicAvailability = {
-  topic: string;
-  available: number;
-};
+/* ------------------------------ Topic helpers ------------------------------ */
+export type TopicAvailability = { topic: string; available: number };
 
-/**
- * Returns just topic names (what the chips expect).
- * Backs onto GET /api/questions/topics which returns [{topic, available}].
- */
 export async function getTopics(): Promise<string[]> {
   const rows = await api.get<TopicAvailability[]>("/questions/topics");
   return rows.map((r) => r.topic);
 }
 
-/** Optional: used by the “Available questions” counter */
 export async function countPublishedForTopic(
   topic: string,
   type: string = "MCQ"
@@ -196,7 +183,6 @@ export async function countPublishedForTopic(
   return res.available ?? 0;
 }
 
-/** Optional: if any admin screen wants the counts too */
 export async function getPublishedTopics(): Promise<TopicAvailability[]> {
   return await request<TopicAvailability[]>("/questions/topics");
 }
@@ -204,34 +190,33 @@ export async function getPublishedTopics(): Promise<TopicAvailability[]> {
 /* ------------------------------ Public API ------------------------------ */
 
 /**
- * If a topic is provided -> call `/questions?...`
- * If no topic            -> call `/questions/published?...` when status is (or defaults to) published
- *
- * Key fix:
- *  - Normalize status ('approved' -> 'published'), default to 'published' when omitted.
- *  - Use the normalized status for choosing the endpoint.
- *  - Accept difficulty labels and map to 1..5.
- *  - Tolerate array | {items} | {rows} response shapes.
+ * getQuestions:
+ *  - Defaults status to 'published' unless caller sets it.
+ *  - Uses buildListQuery() (no leading '?') and concatenates safely.
+ *  - Tolerates {rows} | {items} | [] response shapes.
  */
 export async function getQuestions(
   params: ListParams = {}
 ): Promise<Question[]> {
-  // Normalize status once, and default to 'published' for Assignment use-case
+  // Default to published for general use; Approvals passes status=draft explicitly.
   const normalizedStatus = normalizeStatus(params.status) ?? "published";
 
-  // Build query string with the normalized status
+  // buildListQuery returns "" or something like "?topic=java&status=draft"
   const qs = buildListQuery({ ...params, status: normalizedStatus });
 
-  // Choose endpoint using the normalized status
+  // Only use /questions/published when status === "published"
   const base =
     normalizedStatus === "published" ? "/questions/published" : "/questions";
 
+  // ✅ FIX: no extra "?" — just concatenate
+  const url = qs ? `${base}${qs.startsWith("?") ? "" : "?"}${qs}` : base;
+
   const data = await api.get<
-    DbQuestionRow[] | { items: DbQuestionRow[] } | { rows: DbQuestionRow[] }
-  >(`${base}${qs}`);
+    { items?: DbQuestionRow[] } | { rows?: DbQuestionRow[] } | DbQuestionRow[]
+  >(url);
 
   const rows: DbQuestionRow[] = Array.isArray(data)
-    ? data
+    ? (data as DbQuestionRow[])
     : Array.isArray((data as any)?.items)
     ? (data as any).items
     : Array.isArray((data as any)?.rows)
@@ -241,7 +226,38 @@ export async function getQuestions(
   return rows.map(mapDbRowToQuestion);
 }
 
-/** Create requires topic in query (?topic=...) — unchanged */
+/** Editor "AI Generator" (topic + count only). Hits your existing route. */
+export function generateQuestions(input: {
+  topic: string;
+  count?: number | string; // desired exam length
+  numberOfQuestions?: number | string; // legacy alias
+  poolMultiplier?: number | string; // NEW: compact pool factor (≈ poolMultiplier * count)
+}) {
+  const topic = String(input.topic ?? "").trim();
+  if (topic.length < 2) throw new Error("Topic must be at least 2 characters");
+
+  const toNum = (v: unknown, def: number, lo: number, hi: number) => {
+    const n = typeof v === "number" ? v : Number(v);
+    const x = Number.isFinite(n) ? n : def;
+    return Math.min(hi, Math.max(lo, Math.floor(x)));
+  };
+
+  const count = toNum(input.count ?? input.numberOfQuestions, 5, 1, 50);
+
+  // Default to a small pool ≈ 3× the requested exam length (tweak as you like: 2..6)
+  const poolMultiplier = toNum(input.poolMultiplier, 3, 1, 6);
+
+  return api.post("/questions/generate", { topic, count, poolMultiplier });
+}
+
+/** If you keep a separate "create" path, keep this thin helper too (optional). */
+export async function createQuestions(payload: {
+  topic: string;
+  count: number;
+}) {
+  return api.post("/questions/generate", payload); // same route; single source of truth
+}
+
 export type CreateQuestionPayload = {
   question_text: string;
   options: string[];
@@ -257,32 +273,11 @@ export async function createQuestion(body: CreateQuestionPayload) {
   return api.post("/questions", body);
 }
 
-/** Generate — strict body per BE Zod (no guessing, no extra props) */
-export function generateQuestions(input: {
-  topic: string;
-  difficulty?: number | string;
-  count?: number | string;
-}) {
-  const topic = String(input.topic ?? "").trim();
-  if (topic.length < 2) throw new Error("Topic must be at least 2 characters");
-
-  const toNum = (v: unknown, def: number, lo: number, hi: number) => {
-    const n = typeof v === "number" ? v : Number(v);
-    const x = Number.isFinite(n) ? n : def;
-    return Math.min(hi, Math.max(lo, x));
-  };
-
-  const difficulty = toNum(input.difficulty, 3, 1, 5);
-  const count = toNum(input.count, 5, 1, 50);
-
-  const body = { topic, difficulty, count };
-  return api.post("/questions/generate", body);
-}
-
 export async function updateQuestionStatus(
   id: number,
-  status: "pending" | "approved" | "rejected" | "draft" | "archived"
+  status: "pending" | "published" | "rejected" | "draft" | "archived"
 ): Promise<Question> {
+  // keep your existing endpoint; just map the row back
   const row = await api.patch<DbQuestionRow>(`/publish/${id}`, { status });
   return mapDbRowToQuestion(row);
 }
@@ -292,13 +287,29 @@ export async function removeQuestion(id: number): Promise<void> {
 }
 
 export async function getPublishedQuestions(params: ListParams = {}) {
-  // Ensure this helper also benefits from normalization
   const normalizedStatus = normalizeStatus(params.status) ?? "published";
-  const url = `/questions/published${buildListQuery({
-    ...params,
-    status: normalizedStatus,
-  })}`;
+  const qs = buildListQuery({ ...params, status: normalizedStatus });
+  const url = qs ? `/questions/published?${qs}` : `/questions/published`;
   return api.get<
     DbQuestionRow[] | { items: DbQuestionRow[] } | { rows: DbQuestionRow[] }
   >(url);
+}
+export type TopicSufficiency = {
+  topic: string;
+  examQuestions: number;
+  havePerLevel: Record<1 | 2 | 3 | 4 | 5, number>;
+  requiredPerLevel: Record<1 | 2 | 3 | 4 | 5, number>;
+  sufficient: boolean;
+  shortfalls: Array<{ level: 1 | 2 | 3 | 4 | 5; need: number; have: number }>;
+};
+
+export async function checkTopicSufficiency(
+  topic: string,
+  examQuestions: number
+) {
+  const t = encodeURIComponent(topic.trim());
+  const eq = Math.max(1, Math.min(100, Math.floor(examQuestions)));
+  return api.get<TopicSufficiency>(
+    `/questions/sufficiency?topic=${t}&examQuestions=${eq}`
+  );
 }

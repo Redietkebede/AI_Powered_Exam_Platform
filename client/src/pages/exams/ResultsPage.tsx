@@ -11,17 +11,15 @@ import {
   Legend,
 } from "chart.js";
 
-import {
-  getAttempts,
-  type AttemptRecord as ExamAttempt,
-} from "../../services/examService";
 import { getCurrentUser, type User } from "../../services/userService";
-import { getQuestions } from "../../services/questionService";
-import type { Question } from "../../types/question";
-
-// ✅ add: pull truth from DB for a specific session
-import { getSessionQuestions } from "../../services/sessions";
-import { getSessionAnswers } from "../../services/answers";
+import {
+  getMyAttempts,
+  getAttemptSummary,
+  getAttemptItems,
+  type AttemptItem,
+  type MyAttempt,
+  type AttemptSummary,
+} from "../../services/attemptService";
 
 ChartJS.register(
   CategoryScale,
@@ -38,65 +36,75 @@ const customStyles = `
 .custom-select { background-color: white; }
 `;
 
-function normalizetopic(s?: string | null): string {
+function normalizeTopic(s?: string | null): string {
   const v = (s ?? "").trim();
   return v || "Uncategorized";
 }
 
-// helpers for mapping difficulty (mirror ExamPage)
+// pick whichever field your API returns first
+const pickDifficulty = (it: any): number | null =>
+  (it?.question_difficulty ??
+    it?.questionDifficulty ??
+    it?.difficulty ??
+    it?.numeric_difficulty ??
+    it?.numericDifficulty ??
+    null) as number | null;
+
+// clamp to 1..5, default to Medium (3) instead of "Very Hard"
 const toDifficultyLabel = (
   n?: unknown
 ): "Very Easy" | "Easy" | "Medium" | "Hard" | "Very Hard" => {
-  const v = Number(n);
-  if (v <= 1) return "Very Easy";
-  if (v === 2) return "Easy";
-  if (v === 3) return "Medium";
-  if (v === 4) return "Hard";
-  return "Very Hard";
+  const v = Math.max(1, Math.min(5, Math.round(Number(n) || 3)));
+  return v <= 1
+    ? "Very Easy"
+    : v === 2
+    ? "Easy"
+    : v === 3
+    ? "Medium"
+    : v === 4
+    ? "Hard"
+    : "Very Hard";
 };
 
 export default function ResultsPage() {
-  const [selectedAttemptId, setSelectedAttemptId] = useState<string | null>(
+  // (kept) not used in UI but left to preserve original structure
+  const [user, setUser] = useState<User | null>(null);
+  const [candidateName, setCandidateName] = useState<string>("");
+
+  // attempts list for dropdown + KPI bases
+  const [attempts, setAttempts] = useState<MyAttempt[]>([]);
+  const [selectedAttemptId, setSelectedAttemptId] = useState<number | null>(
     null
   );
 
-  // (kept) not used in UI but left to preserve original structure
-  const [user, setUser] = useState<User | null>(null);
+  // server summary for the selected attempt
+  const [summary, setSummary] = useState<AttemptSummary | null>(null);
+  const [summariesById, setSummariesById] = useState<
+    Record<number, AttemptSummary>
+  >({});
 
-  const [questions, setQuestions] = useState<Question[]>([]);
-
-  // DB-backed truth for a specific finished session (attempt)
-  const [report, setReport] = useState<{
-    sessionId: number;
-    total: number;
-    correct: number;
-    items: Array<{
-      questionId: number;
-      text: string;
-      choices: string[];
-      correctIndex: number;
-      selectedIndex: number | null;
-      correct: boolean;
-      topic?: string | null;
-      difficulty?: number | string | null;
-      type?: string | null;
-      timeTakenSeconds?: number | null;
-    }>;
-  } | null>(null);
-
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  // Pull all attempts from the exam service
-  const [attempts, setAttempts] = useState<ExamAttempt[]>([]);
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const rows = await getAttempts();
-        if (alive) setAttempts(rows ?? []);
+        const list = await getMyAttempts();
+        if (!alive) return;
+        setAttempts(list ?? []);
+        console.debug("[ResultsPage] attempts:", list);
+
+        // auto-select: first valid attempt id (usually latest after sorting below)
+        if ((list?.length ?? 0) > 0 && selectedAttemptId == null) {
+          const firstValid = (list as any[]).find((a) =>
+            Number.isFinite(Number((a as any).id ?? (a as any).attemptId))
+          );
+          const firstId = Number(
+            (firstValid as any)?.id ?? (firstValid as any)?.attemptId
+          );
+          if (Number.isFinite(firstId)) setSelectedAttemptId(firstId);
+        }
       } catch {
-        if (alive) setAttempts([]);
+        if (!alive) return;
+        setAttempts([]);
       }
     })();
     return () => {
@@ -105,7 +113,6 @@ export default function ResultsPage() {
   }, []);
 
   // Store candidate name only (avoid type mismatch)
-  const [candidateName, setCandidateName] = useState<string>("");
   useEffect(() => {
     getCurrentUser()
       .then((u) => {
@@ -115,31 +122,92 @@ export default function ResultsPage() {
       .catch(() => setCandidateName(""));
   }, []);
 
-  // Load bank questions (for topics list)
   useEffect(() => {
+    if (selectedAttemptId == null || Number.isNaN(Number(selectedAttemptId))) {
+      setSummary(null);
+      return;
+    }
     let alive = true;
-    getQuestions({ topic: "" })
-      .then((qs) => {
-        if (alive) setQuestions(qs ?? []);
-      })
-      .catch(() => {
-        if (alive) setQuestions([]);
-      });
+    (async () => {
+      try {
+        const s = await getAttemptSummary(Number(selectedAttemptId));
+        if (!alive) return;
+        setSummary(s);
+        console.debug("[ResultsPage] summary:", s);
+      } catch {
+        if (!alive) return;
+        setSummary(null);
+      }
+    })();
     return () => {
       alive = false;
     };
-  }, []);
+  }, [selectedAttemptId]);
 
   // Get attempts for the current candidate only
-  const candidateAttempts = useMemo<ExamAttempt[]>(() => {
-    if (!candidateName) return attempts;
-    return attempts.filter(
-      (a: any) => a.candidate === candidateName || a.userName === candidateName
+  const candidateAttempts = useMemo<MyAttempt[]>(
+    () => attempts ?? [],
+    [attempts]
+  );
+
+  // Sort attempts by finished_at (fallback created_at) — latest first
+  const sortedAttempts = useMemo(() => {
+    const list = (candidateAttempts ?? []).slice();
+    list.sort((a: any, b: any) => {
+      const ta = new Date(a?.finished_at ?? a?.created_at ?? 0).getTime();
+      const tb = new Date(b?.finished_at ?? b?.created_at ?? 0).getTime();
+      return tb - ta;
+    });
+    return list;
+  }, [candidateAttempts]);
+
+  useEffect(() => {
+    if (selectedAttemptId != null) return;
+
+    const firstValid = (sortedAttempts as any[]).find((a) =>
+      Number.isFinite(Number(a?.id ?? a?.attemptId))
     );
-  }, [attempts, candidateName]);
+    if (!firstValid) return;
+
+    const id = Number(firstValid.id ?? firstValid.attemptId);
+    if (Number.isFinite(id)) {
+      setSelectedAttemptId(id);
+      console.debug("[ResultsPage] auto-select ->", id);
+    }
+  }, [sortedAttempts, selectedAttemptId]);
+
+  useEffect(() => {
+    if (!candidateAttempts.length) return;
+    let alive = true;
+
+    (async () => {
+      const validIds = candidateAttempts
+        .map((a) => Number((a as any).id ?? (a as any).attemptId))
+        .filter((n) => Number.isFinite(n));
+
+      const missing = validIds.filter((id) => summariesById[id] == null);
+
+      if (!missing.length) return;
+
+      const entries = await Promise.all(
+        missing.map(async (id) => [id, await getAttemptSummary(id)] as const)
+      );
+
+      if (alive) {
+        setSummariesById((prev) => ({
+          ...prev,
+          ...Object.fromEntries(entries),
+        }));
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [candidateAttempts, summariesById]);
 
   // Pick the selected attempt from dropdown (string id)
-  const selectedAttempt = useMemo<ExamAttempt | null>(() => {
+  const selectedAttempt = useMemo<MyAttempt | null>(() => {
     const id = selectedAttemptId;
     return (
       candidateAttempts.find(
@@ -150,46 +218,73 @@ export default function ResultsPage() {
     );
   }, [candidateAttempts, selectedAttemptId]);
 
-  // topics available in the bank (normalized)
-  const topics = useMemo<string[]>(
-    () =>
-      Array.from(
-        new Set(questions.map((q) => normalizetopic((q as any).topic)))
-      ).sort(),
-    [questions]
-  );
+  // Map the DB report to an AttemptRecord shape so downstream UI stays unchanged
+  const [attemptItems, setAttemptItems] = useState<AttemptItem[]>([]);
+  useEffect(() => {
+    if (selectedAttemptId == null || Number.isNaN(Number(selectedAttemptId))) {
+      setAttemptItems([]);
+      return;
+    }
+    let alive = true;
+    (async () => {
+      try {
+        const rows = await getAttemptItems(Number(selectedAttemptId), {
+          limit: 1000,
+        });
+
+        if (alive) setAttemptItems(rows ?? []);
+        console.debug("[ResultsPage] attemptItems:", rows);
+      } catch {
+        if (alive) setAttemptItems([]);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [selectedAttemptId]);
+
+  // =========================
+  // Aggregations / KPIs
+  // =========================
 
   // Overall candidate performance summary
   const candidateStats = useMemo(() => {
-    const totalAttempts = candidateAttempts.length;
+    const summaries = candidateAttempts
+      .map((a: any) => summariesById[Number(a?.id ?? a?.attemptId)])
+      .filter(Boolean) as AttemptSummary[];
 
-    const totalQuestions = candidateAttempts.reduce(
-      (sum: number, a: ExamAttempt) => sum + a.items.length,
+    const totalAttempts = summaries.length;
+    if (!totalAttempts) {
+      return {
+        totalAttempts: 0,
+        avgScore: 0,
+        totalQuestions: 0,
+        correctAnswers: 0,
+        overallAccuracy: 0,
+      };
+    }
+
+    const totalQuestions = summaries.reduce(
+      (s, x) => s + (x.total_questions ?? 0),
       0
     );
 
-    const correctAnswers = candidateAttempts.reduce(
-      (sum: number, a: ExamAttempt) =>
-        sum + a.items.filter((i) => i.correct).length,
+    const correctAnswers = summaries.reduce(
+      (s, x) => s + (x.correct_questions ?? 0),
       0
     );
 
-    const avgScore =
-      candidateAttempts.length > 0
-        ? Math.round(
-            candidateAttempts.reduce(
-              (sum: number, a: ExamAttempt) =>
-                sum +
-                (a.items.filter((i) => i.correct).length / a.items.length) *
-                  100,
-              0
-            ) / candidateAttempts.length
-          )
-        : 0;
+    const avgScore = Math.round(
+      summaries.reduce((s, x) => {
+        const tq = x.total_questions ?? 0;
+        const cq = x.correct_questions ?? 0;
+        return s + (tq > 0 ? (100 * cq) / tq : 0);
+      }, 0) / totalAttempts
+    );
 
     const overallAccuracy =
       totalQuestions > 0
-        ? Math.round((correctAnswers / totalQuestions) * 100)
+        ? Math.round((100 * correctAnswers) / totalQuestions)
         : 0;
 
     return {
@@ -199,210 +294,116 @@ export default function ResultsPage() {
       correctAnswers,
       overallAccuracy,
     };
-  }, [candidateAttempts]);
+  }, [candidateAttempts, summariesById]);
 
-  /* ---------------- DB truth loader (attemptId from URL or latest finished) ---------------- */
-  useEffect(() => {
-    let alive = true;
+  // Topics present in this attempt (source of truth)
+  const attemptTopics = useMemo<string[]>(
+    () =>
+      Array.from(
+        new Set(
+          attemptItems.map((it) => normalizeTopic((it as any).topic as string))
+        )
+      ).sort(),
+    [attemptItems]
+  );
 
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const params = new URLSearchParams(window.location.search);
-        const idFromUrl = params.get("attemptId");
-        let sessionId: number | null = idFromUrl ? Number(idFromUrl) : null;
-
-        // Fallback: latest finished attempt from the attempts list
-        if (!sessionId || !Number.isFinite(sessionId)) {
-          const finished = (attempts ?? []).filter(
-            (a) => (a as any).finishedAt || (a as any).finished_at
-          );
-          finished.sort(
-            (a: any, b: any) =>
-              new Date(b.finishedAt ?? b.finished_at ?? 0).getTime() -
-              new Date(a.finishedAt ?? a.finished_at ?? 0).getTime()
-          );
-          sessionId = finished[0]
-            ? Number((finished[0] as any).attemptId ?? (finished[0] as any).id)
-            : null;
-        }
-
-        if (!sessionId) throw new Error("No finished exam found.");
-
-        // Pull questions + answers from DB
-        const [qsRaw, ansRaw] = await Promise.all([
-          getSessionQuestions(sessionId),
-          getSessionAnswers(sessionId),
-        ]);
-
-        const qnorm = (qsRaw ?? []).map((q: any) => ({
-          id: Number(q.questionId ?? q.id),
-          text: q.questionText ?? q.text ?? q.question_text ?? q.prompt ?? "",
-          choices: (q.choices ?? q.options ?? []).slice(),
-          correctIndex: Number(
-            q.correctIndex ??
-              q.correct_index ??
-              q.correct_option ??
-              q.correctAnswer ??
-              q.correct_answer ??
-              0
-          ),
-          topic: q.topic ?? q.subject ?? q.category ?? q.tags?.[0] ?? null,
-          difficulty: q.difficulty ?? q.numericDifficulty ?? null,
-          type: (q.type ?? "MCQ") as string,
-        }));
-
-        const answers = new Map<
-          number,
-          { selectedIndex: number; timeTakenSeconds?: number | null }
-        >(
-          (ansRaw ?? []).map((a: any) => [
-            Number(a.questionId ?? a.qid ?? a.question_id),
-            {
-              selectedIndex: Number(
-                a.selectedIndex ?? a.answer_index ?? a.selected_index ?? -1
-              ),
-              timeTakenSeconds:
-                a.timeTakenSeconds ?? a.time_taken_seconds ?? null,
-            },
-          ])
-        );
-
-        const items = qnorm.map((q) => {
-          const sel = answers.get(q.id);
-          return {
-            questionId: q.id,
-            text: q.text,
-            choices: q.choices,
-            correctIndex: q.correctIndex,
-            selectedIndex: sel ? sel.selectedIndex : null,
-            correct: sel != null && sel.selectedIndex === q.correctIndex,
-            topic: q.topic,
-            difficulty: q.difficulty,
-            type: q.type,
-            timeTakenSeconds: sel?.timeTakenSeconds ?? null,
-          };
-        });
-
-        const correct = items.filter((i) => i.correct).length;
-
-        if (!alive) return;
-        setReport({ sessionId, total: qnorm.length, correct, items });
-
-        // Preselect this attempt in the dropdown
-        setSelectedAttemptId(String(sessionId));
-      } catch (e: any) {
-        if (!alive) return;
-        setError(e?.message ?? "Failed to load results.");
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-  }, [attempts]); // <<— IMPORTANT: rerun when attempts arrive
-
-  /* --------- Use DB report as the effective attempt for charts/tables (UI unchanged) --------- */
-
-  // Map the DB report to an AttemptRecord shape so downstream UI stays unchanged
-  const reportAsAttempt: ExamAttempt | null = useMemo(() => {
-    if (!report) return null;
-
-    useEffect(() => {
-      console.log({
-        attempts,
-        candidateAttempts,
-        selectedAttemptId,
-        report,
-      });
-    }, [attempts, candidateAttempts, selectedAttemptId, report]);
-
-    return {
-      attemptId: String(report.sessionId), // <-- stringify
-      candidate: candidateName,
-      startedAt: "", // not shown; fine to leave empty
-      items: report.items.map((it) => ({
-        questionId: it.questionId,
-        topic: normalizetopic(typeof it.topic === "string" ? it.topic : null),
-        difficulty: toDifficultyLabel(
-          typeof it.difficulty === "number"
-            ? it.difficulty
-            : Number(it.difficulty)
-        ),
-        type: (it.type as string) || "MCQ",
-        correct: !!it.correct,
-        timeSpentMs: Math.max(
-          0,
-          Math.round(
-            (typeof it.timeTakenSeconds === "number"
-              ? it.timeTakenSeconds
-              : 0) * 1000
-          )
-        ),
-      })),
-    } as ExamAttempt;
-  }, [report, candidateName]);
-
-  // This is what the UI components read everywhere below
-  const effectiveAttempt = reportAsAttempt ?? selectedAttempt;
-
-  // Selected attempt: topic accuracy (unchanged UI)
+  // Selected attempt: topic accuracy (locked to allowed topics / asked topics)
   const topicStats = useMemo(() => {
-    if (!effectiveAttempt)
+    if (!selectedAttempt)
       return [] as { topic: string; correct: number; total: number }[];
 
-    const map: Record<string, { correct: number; total: number }> = {};
-    for (const it of effectiveAttempt.items) {
-      const k = normalizetopic((it as any).topic as string);
-      map[k] = map[k] || { correct: 0, total: 0 };
-      map[k].total += 1;
-      map[k].correct += it.correct ? 1 : 0;
+    // Build tallies from the items we actually asked
+    const tallies: Record<string, { correct: number; total: number }> = {};
+    for (const it of attemptItems) {
+      const k = normalizeTopic((it as any).topic as string);
+      if (!tallies[k]) tallies[k] = { correct: 0, total: 0 };
+      tallies[k].total += 1;
+      tallies[k].correct += it.correct ? 1 : 0;
     }
 
-    return topics.map((s) => ({
-      topic: s,
-      correct: map[s]?.correct ?? 0,
-      total: map[s]?.total ?? 0,
-    }));
-  }, [effectiveAttempt, topics]);
+    // If the attempt has an explicit allowed topics list, keep only those
+    const rawAllowed: string[] = Array.isArray((selectedAttempt as any)?.topics)
+      ? ((selectedAttempt as any).topics as string[])
+      : [];
 
-  // Selected attempt: difficulty accuracy (unchanged UI)
+    const allowed =
+      rawAllowed.length > 0 ? rawAllowed.map(normalizeTopic) : attemptTopics; // fallback: only topics that actually appeared
+
+    return allowed
+      .map((t) => ({
+        topic: t,
+        correct: tallies[t]?.correct ?? 0,
+        total: tallies[t]?.total ?? 0,
+      }))
+      .filter((r) => r.total > 0); // show only topics that appeared
+  }, [selectedAttempt, attemptItems, attemptTopics]);
+
+  // Accuracy by Difficulty (computed from actual items)
   const difficultyStats = useMemo(() => {
-    if (!effectiveAttempt) return [] as { label: string; accuracy: number }[];
     const order = ["Very Easy", "Easy", "Medium", "Hard", "Very Hard"] as const;
-    return order.map((d) => {
-      const items = effectiveAttempt.items.filter(
-        (i: any) => i.difficulty === d
-      );
-      const acc = items.length
-        ? Math.round(
-            (items.filter((i) => i.correct).length / items.length) * 100
-          )
-        : 0;
-      return { label: d, accuracy: acc };
-    });
-  }, [effectiveAttempt]);
 
-  // Running accuracy time series (unchanged UI)
-  const timeSeries = useMemo(() => {
-    if (!effectiveAttempt)
-      return { labels: [] as string[], scores: [] as number[] };
-    const labels = effectiveAttempt.items.map(
-      (_, idx: number) => `Q${idx + 1}`
-    );
-    const accProgress = effectiveAttempt.items.map((i) => (i.correct ? 1 : 0));
-    const cum: number[] = [];
-    let sum: number = 0;
-    for (let i = 0; i < accProgress.length; i++) {
-      sum += accProgress[i];
-      cum.push(Math.round((sum / (i + 1)) * 100));
+    // Case-insensitive / numeric → label normalizer
+    const toLabel = (v: any): (typeof order)[number] => {
+      const s = String(v?.difficulty ?? v ?? "")
+        .trim()
+        .toLowerCase();
+      const n = Number(s);
+      if (Number.isFinite(n)) return order[Math.max(0, Math.min(4, n - 1))];
+      if (s === "very easy" || s === "very_easy") return "Very Easy";
+      if (s === "easy") return "Easy";
+      if (s === "medium") return "Medium";
+      if (s === "hard") return "Hard";
+      if (s === "very hard" || s === "very_hard") return "Very Hard";
+      return "Medium";
+    };
+
+    // Compute from the actual attempt questions (source of truth)
+    const buckets: Record<(typeof order)[number], { c: number; t: number }> = {
+      "Very Easy": { c: 0, t: 0 },
+      Easy: { c: 0, t: 0 },
+      Medium: { c: 0, t: 0 },
+      Hard: { c: 0, t: 0 },
+      "Very Hard": { c: 0, t: 0 },
+    };
+    for (const it of attemptItems) {
+      const lbl = toLabel({ difficulty: pickDifficulty(it) });
+      buckets[lbl].t += 1;
+      if (it.correct) buckets[lbl].c += 1;
     }
-    return { labels, scores: cum };
-  }, [effectiveAttempt]);
+    return order.map((label) => ({
+      label,
+      accuracy:
+        buckets[label].t > 0
+          ? Math.round((100 * buckets[label].c) / buckets[label].t)
+          : 0,
+    }));
+  }, [attemptItems]);
+
+  // Running accuracy time series
+  const timeSeries = useMemo(() => {
+    const seq = summary?.sequence ?? []; // booleans in the order answered
+    // Prefer the max we know to avoid off-by-one from the BE
+    const total = Math.max(
+      Number(summary?.total_questions ?? 0),
+      attemptItems.length
+    );
+
+    if (!total) return { labels: [] as string[], scores: [] as number[] };
+
+    const labels = Array.from({ length: total }, (_, i) => `Q${i + 1}`);
+
+    // Walk the booleans we have; pad the rest by carrying the last accuracy
+    const scores: number[] = [];
+    let correct = 0;
+
+    for (let i = 0; i < total; i++) {
+      if (i < seq.length && seq[i]) correct += 1;
+      const denom = Math.max(1, i + 1);
+      scores.push(Math.round((100 * correct) / denom));
+    }
+
+    return { labels, scores };
+  }, [summary, attemptItems.length]);
 
   const difficultyLine = {
     labels: timeSeries.labels,
@@ -443,8 +444,13 @@ export default function ResultsPage() {
     ],
   };
 
-  // Keep empty-state only if neither DB report nor candidate attempts exist
-  if (!reportAsAttempt && !candidateAttempts.length) {
+  console.debug(
+    "[ResultsPage] candidateAttempts.len:",
+    candidateAttempts.length
+  );
+
+  // Empty state: no attempts to show
+  if (!candidateAttempts.length) {
     return (
       <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
         {/* Header */}
@@ -506,7 +512,7 @@ export default function ResultsPage() {
     );
   }
 
-  // Everything below is unchanged UI; it now reads from `effectiveAttempt`
+  // Everything below is unchanged UI; it now reads from the corrected aggregates
   return (
     <>
       <style>{customStyles}</style>
@@ -624,42 +630,41 @@ export default function ResultsPage() {
             </label>
             <select
               value={selectedAttemptId ?? ""}
-              onChange={(e) => setSelectedAttemptId(e.target.value || null)}
+              onChange={(e) =>
+                setSelectedAttemptId(
+                  e.target.value ? Number(e.target.value) : null
+                )
+              }
               className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#0f2744]/40 focus:border-[#0f2744] transition-colors custom-select"
               style={{ color: "#374151" }}
             >
-              <option value="">Choose an attempt...</option>
-              {candidateAttempts.map((a: any, index: number) => (
-                <option
-                  key={String(a.attemptId ?? a.id)}
-                  value={String(a.attemptId ?? a.id)}
-                >
-                  Attempt #{index + 1} —{" "}
-                  {new Date(
-                    a.startedAt ??
-                      a.started_at ??
-                      a.finishedAt ??
-                      a.finished_at ??
-                      Date.now()
-                  ).toLocaleDateString()}{" "}
-                  ({a.items?.length ?? a.total_questions ?? 0} questions)
-                </option>
-              ))}
-              {/* If the DB report’s sessionId isn’t in candidateAttempts, still show it */}
-              {report &&
-                !candidateAttempts.some(
-                  (a) => String(a.attemptId) === String(report.sessionId)
-                ) && (
-                  <option value={String(report.sessionId)}>
-                    Attempt (from DB) — {report.total} questions
+              <option value="">Choose an attempt…</option>
+              {sortedAttempts.map((a: any, index: number) => {
+                const id = Number(a?.id ?? a?.attemptId);
+                if (!Number.isFinite(id)) return null; // skip bad rows safely
+
+                const when = new Date(
+                  a?.finished_at ?? a?.created_at ?? Date.now()
+                ).toLocaleDateString();
+
+                const s = summariesById[id];
+                const qCount =
+                  Number(s?.total_questions ?? 0) ||
+                  Number(a?.total_questions ?? 0) ||
+                  0;
+
+                return (
+                  <option key={`attempt-${id}`} value={id}>
+                    {`Attempt #${index + 1} — ${when} (${qCount} questions)`}
                   </option>
-                )}
+                );
+              })}
             </select>
           </div>
         </div>
 
         {/* Attempt-specific insights */}
-        {effectiveAttempt && (
+        {selectedAttempt && (
           <>
             {/* Charts */}
             <div className="grid lg:grid-cols-2 gap-6">
@@ -684,24 +689,7 @@ export default function ResultsPage() {
                 </h3>
                 <div className="mt-4">
                   <Line
-                    data={{
-                      labels: timeSeries.labels,
-                      datasets: [
-                        {
-                          label: "Running Accuracy",
-                          data: timeSeries.scores,
-                          borderColor: "#ff7a59",
-                          backgroundColor: "rgba(255, 122, 89, 0.1)",
-                          borderWidth: 3,
-                          tension: 0.4,
-                          pointBackgroundColor: "#ff7a59",
-                          pointBorderColor: "#ffffff",
-                          pointBorderWidth: 2,
-                          pointRadius: 6,
-                          pointHoverRadius: 8,
-                        },
-                      ],
-                    }}
+                    data={difficultyLine}
                     options={{
                       responsive: true,
                       plugins: { legend: { display: false } },
@@ -744,25 +732,7 @@ export default function ResultsPage() {
                 </h3>
                 <div className="mt-4">
                   <Bar
-                    data={{
-                      labels: difficultyStats.map((d) => d.label),
-                      datasets: [
-                        {
-                          label: "Accuracy",
-                          data: difficultyStats.map((d) => d.accuracy),
-                          backgroundColor: [
-                            "#ff7a59",
-                            "#ff9f7f",
-                            "#ffb8a3",
-                            "#ffd1c7",
-                            "#ffeaea",
-                          ],
-                          borderRadius: 8,
-                          borderSkipped: false,
-                          borderWidth: 0,
-                        },
-                      ],
-                    }}
+                    data={difficultyBars}
                     options={{
                       responsive: true,
                       plugins: { legend: { display: false } },
@@ -917,7 +887,7 @@ export default function ResultsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {effectiveAttempt?.items.map((it: any, idx: number) => (
+                    {attemptItems.map((it: AttemptItem, idx: number) => (
                       <tr
                         key={`${it.questionId}-${idx}`}
                         className={`border-b border-gray-100 ${
@@ -928,16 +898,16 @@ export default function ResultsPage() {
                           Q{idx + 1}
                         </td>
                         <td className="p-4 text-gray-700">
-                          {normalizetopic(it.topic as string)}
+                          {normalizeTopic(it.topic as string)}
                         </td>
                         <td className="p-4">
                           <span className="px-3 py-1.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
-                            {it.difficulty}
+                            {toDifficultyLabel((it as any).difficulty)}
                           </span>
                         </td>
                         <td className="p-4">
                           <span className="px-3 py-1.5 rounded-full text-xs font-medium bg-[#ff7a59]/10 text-[#ff7a59]">
-                            {it.type}
+                            {(it as any).type ?? "MCQ"}
                           </span>
                         </td>
                         <td className="p-4">
@@ -956,8 +926,7 @@ export default function ResultsPage() {
                         </td>
                       </tr>
                     ))}
-                    {(!effectiveAttempt ||
-                      effectiveAttempt.items.length === 0) && (
+                    {(!selectedAttemptId || attemptItems.length === 0) && (
                       <tr>
                         <td
                           colSpan={6}
