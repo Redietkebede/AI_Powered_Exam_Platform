@@ -5,6 +5,14 @@ import type { Question } from "../types/question";
 import type { DbQuestionRow } from "../adapters/dbQuestionRow";
 import { mapDbRowToQuestion } from "../adapters/dbQuestionRow";
 
+const isDev = import.meta.env.MODE === "development";
+const provider = (import.meta.env.VITE_LLM_PROVIDER ?? "").toLowerCase();
+/** Use small pool on free/dev to avoid 429s */
+const DEFAULT_POOL_MULT = isDev || provider === "openrouter_free" ? 1 : 3;
+
+const clamp = (n: number, lo: number, hi: number) =>
+  Math.min(hi, Math.max(lo, n));
+
 /* ------------------------ Legacy-friendly inputs ------------------------ */
 type LegacyCreateInput = {
   topic: string;
@@ -227,27 +235,34 @@ export async function getQuestions(
 }
 
 /** Editor "AI Generator" (topic + count only). Hits your existing route. */
+/** Editor "AI Generator" */
 export function generateQuestions(input: {
   topic: string;
   count?: number | string; // desired exam length
   numberOfQuestions?: number | string; // legacy alias
-  poolMultiplier?: number | string; // NEW: compact pool factor (≈ poolMultiplier * count)
+  poolMultiplier?: number | string; // optional compact pool factor
+  comment?: string; // NEW optional guidance
 }) {
   const topic = String(input.topic ?? "").trim();
   if (topic.length < 2) throw new Error("Topic must be at least 2 characters");
 
+  // inside generateQuestions(...)
   const toNum = (v: unknown, def: number, lo: number, hi: number) => {
     const n = typeof v === "number" ? v : Number(v);
     const x = Number.isFinite(n) ? n : def;
-    return Math.min(hi, Math.max(lo, Math.floor(x)));
+    return clamp(Math.floor(x), lo, hi);
   };
 
   const count = toNum(input.count ?? input.numberOfQuestions, 5, 1, 50);
+  const poolMultiplier = toNum(input.poolMultiplier, DEFAULT_POOL_MULT, 3, 6);
 
-  // Default to a small pool ≈ 3× the requested exam length (tweak as you like: 2..6)
-  const poolMultiplier = toNum(input.poolMultiplier, 3, 1, 6);
-
-  return api.post("/questions/generate", { topic, count, poolMultiplier });
+  return api.post("/questions/generate", {
+    topic,
+    count,
+    difficulty: 3, // <- REQUIRED by BE union
+    poolMultiplier, // <- 1 on free/dev
+    ...(input.comment?.trim() ? { comment: input.comment.trim() } : {}),
+  });
 }
 
 /** If you keep a separate "create" path, keep this thin helper too (optional). */

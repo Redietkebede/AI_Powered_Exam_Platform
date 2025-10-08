@@ -23,6 +23,7 @@ export default function AiGeneratorPage() {
   const [loading, setLoading] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<"manual" | "ai">("manual");
+  const [comment, setComment] = useState<string>("");
 
   // ---- Manual tab state (use topic, not topic) ----
   const [manual, setManual] = useState({
@@ -204,6 +205,7 @@ export default function AiGeneratorPage() {
       const res: any = await generateQuestions({
         topic: safeTopic,
         count: countN,
+        comment: comment?.trim() || undefined,
       });
 
       if (res?.inserted !== undefined) {
@@ -293,7 +295,7 @@ export default function AiGeneratorPage() {
             {/* topic (manual) */}
             <div className="grid gap-1.5">
               <label className="text-xs font-medium text-slate-700">
-                Topic 
+                Topic
               </label>
               <input
                 value={manual.topic}
@@ -497,49 +499,76 @@ export default function AiGeneratorPage() {
         </div>
       )}
 
-      {/* AI Generator Tab (unchanged) */}
+      {/* AI Generator Tab */}
       {activeTab === "ai" && (
         <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-          <label className="block text-xs font-medium text-slate-700 mb-1">
-            Topic
-          </label>
-          <input
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            className="mb-3 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
-            placeholder="e.g., Algorithms"
-          />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Left side: existing fields */}
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Topic
+              </label>
+              <input
+                value={topic}
+                onChange={(e) => setTopic(e.target.value)}
+                className="mb-3 w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
+                placeholder="e.g., Algorithms"
+              />
 
-          <div className="mt-3 grid gap-1.5">
-            <label className="text-xs font-medium text-slate-700">
-              How many?
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={count}
-              onChange={(e) =>
-                setCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))
-              }
-              className="w-24 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
-            />
+              <div className="mt-3 grid gap-1.5">
+                <label className="text-xs font-medium text-slate-700">
+                  How many?
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={count}
+                  onChange={(e) =>
+                    setCount(
+                      Math.max(1, Math.min(10, Number(e.target.value) || 1))
+                    )
+                  }
+                  className="w-24 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
+                />
+              </div>
+
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleGenerate} // your existing handler
+                className="mt-4 inline-flex items-center gap-2 rounded-md bg-[#ff7a59] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-60"
+              >
+                {loading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Wand2 className="h-4 w-4" />
+                )}
+                Generate & Save
+              </button>
+            </div>
+
+            {/* Right side: NEW optional comment */}
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Comment to guide the model (optional)
+              </label>
+              <textarea
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                rows={8}
+                maxLength={1000}
+                placeholder="e.g., prefer graph algorithms, include 1 BFS and 1 Dijkstra, avoid code, emphasize conceptual traps..."
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500"
+              />
+              <div className="mt-1 text-[11px] text-slate-500">
+                This won’t change the base prompt—it's just extra guidance for
+                this request.
+              </div>
+            </div>
           </div>
 
-          <button
-            type="button"
-            disabled={loading}
-            onClick={handleGenerate}
-            className="mt-4 inline-flex items-center gap-2 rounded-md bg-[#ff7a59] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-60"
-          >
-            {loading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Wand2 className="h-4 w-4" />
-            )}
-            Generate & Save
-          </button>
-
+          {/* existing log renderer stays below ... */}
           {log.length > 0 && (
             <div className="mt-4 space-y-2 text-xs">
               {log.map((l, i) => (

@@ -42,19 +42,29 @@ function normalizeTopic(s?: string | null): string {
 }
 
 // pick whichever field your API returns first
-const pickDifficulty = (it: any): number | null =>
-  (it?.question_difficulty ??
-    it?.questionDifficulty ??
-    it?.difficulty ??
-    it?.numeric_difficulty ??
-    it?.numericDifficulty ??
-    null) as number | null;
+type DiffLabel = "Very Easy" | "Easy" | "Medium" | "Hard" | "Very Hard";
 
-// clamp to 1..5, default to Medium (3) instead of "Very Hard"
-const toDifficultyLabel = (
-  n?: unknown
-): "Very Easy" | "Easy" | "Medium" | "Hard" | "Very Hard" => {
-  const v = Math.max(1, Math.min(5, Math.round(Number(n) || 3)));
+const getDifficultyLabel = (row: any): DiffLabel => {
+  const raw =
+    row?.difficulty ??
+    row?.question_difficulty ??
+    row?.questionDifficulty ??
+    row?.numeric_difficulty ??
+    row?.numericDifficulty;
+
+  // If API already gives a label string, normalize and return it
+  if (typeof raw === "string") {
+    const s = raw.trim().toLowerCase();
+    if (["very easy", "easy", "medium", "hard", "very hard"].includes(s)) {
+      return (s.charAt(0).toUpperCase() + s.slice(1)) as DiffLabel;
+    }
+    // If numeric string, fall through to numeric handling
+  }
+
+  // Numeric handling (clamp 1..5)
+  const n = Number(raw);
+  const v = Number.isFinite(n) ? Math.max(1, Math.min(5, Math.round(n))) : 3;
+
   return v <= 1
     ? "Very Easy"
     : v === 2
@@ -65,6 +75,9 @@ const toDifficultyLabel = (
     ? "Hard"
     : "Very Hard";
 };
+
+// hide/show the "Time" column in the Question Breakdown
+const SHOW_TIME = false;
 
 export default function ResultsPage() {
   // (kept) not used in UI but left to preserve original structure
@@ -366,10 +379,17 @@ export default function ResultsPage() {
       "Very Hard": { c: 0, t: 0 },
     };
     for (const it of attemptItems) {
-      const lbl = toLabel({ difficulty: pickDifficulty(it) });
+      const lbl = toLabel(
+        (it as any).difficulty ??
+          (it as any).question_difficulty ??
+          (it as any).questionDifficulty ??
+          (it as any).numeric_difficulty ??
+          (it as any).numericDifficulty
+      );
       buckets[lbl].t += 1;
       if (it.correct) buckets[lbl].c += 1;
     }
+
     return order.map((label) => ({
       label,
       accuracy:
@@ -881,9 +901,11 @@ export default function ResultsPage() {
                       <th className="text-left p-4 font-semibold text-[#0f2744] text-sm">
                         Result
                       </th>
-                      <th className="text-left p-4 font-semibold text-[#0f2744] text-sm">
-                        Time
-                      </th>
+                      {SHOW_TIME && (
+                        <th className="text-left p-4 font-semibold text-[#0f2744] text-sm">
+                          Time
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -902,7 +924,7 @@ export default function ResultsPage() {
                         </td>
                         <td className="p-4">
                           <span className="px-3 py-1.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
-                            {toDifficultyLabel((it as any).difficulty)}
+                            {getDifficultyLabel(it)}
                           </span>
                         </td>
                         <td className="p-4">
@@ -921,9 +943,11 @@ export default function ResultsPage() {
                             {it.correct ? "Correct" : "Incorrect"}
                           </span>
                         </td>
-                        <td className="p-4 text-gray-700">
-                          {Math.round((it.timeSpentMs ?? 0) / 1000)}s
-                        </td>
+                        {SHOW_TIME && (
+                          <td className="p-4 text-gray-700">
+                            {Math.round(it.timeSpentMs ?? 0)}s
+                          </td>
+                        )}
                       </tr>
                     ))}
                     {(!selectedAttemptId || attemptItems.length === 0) && (

@@ -11,9 +11,20 @@ type Counts = {
   rejected: number;
 };
 
+const DIFF_OPTIONS = [
+  { key: "all" as const, label: "All difficulties" },
+  { key: 1 as const, label: "Very Easy" },
+  { key: 2 as const, label: "Easy" },
+  { key: 3 as const, label: "Medium" },
+  { key: 4 as const, label: "Hard" },
+  { key: 5 as const, label: "Very Hard" },
+];
+
+type DiffChoice = (typeof DIFF_OPTIONS)[number]["key"];
+
 export default function EditorDashboard() {
   const [topic, setTopic] = useState<string>("");
-  const [difficulty, setDifficulty] = useState<number>(3); // 1..5
+  const [difficulty, setDifficulty] = useState<DiffChoice>(3); // default Medium
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [recent, setRecent] = useState<ActivityItem[]>([]);
@@ -52,6 +63,11 @@ export default function EditorDashboard() {
     }
     setErr(null);
     setLoading(true);
+
+    const baseParams = { topic: t } as { topic: string; difficulty?: number };
+
+    if (difficulty !== "all")
+      baseParams.difficulty = difficulty as 1 | 2 | 3 | 4 | 5;
 
     try {
       // 1) Try status-scoped fetches first (preferred)
@@ -210,27 +226,29 @@ export default function EditorDashboard() {
           </div>
 
           <div className="flex flex-col">
-            <label className="text-xs text-gray-600 mb-1">
-              Difficulty (1–5)
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={5}
-              value={difficulty}
+            <label className="text-xs text-gray-600 mb-1">Difficulty</label>
+            <select
+              value={String(difficulty)}
               onChange={(e) => {
-                const n = Number(e.target.value);
-                setDifficulty(
-                  Number.isFinite(n) ? Math.min(5, Math.max(1, n)) : 3
-                );
+                const v =
+                  e.target.value === "all"
+                    ? "all"
+                    : (Number(e.target.value) as 1 | 2 | 3 | 4 | 5);
+                setDifficulty(v as DiffChoice);
               }}
-              className="border border-gray-300 rounded-md px-3 py-2 w-24 focus:outline-none focus:ring-2 focus:ring-[#0f2744]/30"
-            />
+              className="border border-gray-300 rounded-md px-3 py-2 w-48 focus:outline-none focus:ring-2 focus:ring-[#0f2744]/30 bg-white"
+            >
+              {DIFF_OPTIONS.map((opt) => (
+                <option key={String(opt.key)} value={String(opt.key)}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
           </div>
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !topic.trim()}
             className="rounded-md bg-[#0f2744] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:opacity-60"
           >
             {loading ? "Loading..." : "Load"}

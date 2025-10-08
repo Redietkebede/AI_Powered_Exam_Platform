@@ -5,6 +5,52 @@ import { logBadGen } from "../doc/logBadGen";
 import { validateQuestion } from "./validateQuestion";
 import type { Question } from "../middleware/qustions";
 
+// ── simple sleep
+function delay(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── retry wrapper with exponential backoff + jitter
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function withBackoff<T>(
+  fn: () => Promise<T>,
+  maxRetries = 5
+): Promise<T> {
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      const status = Number(e?.status || e?.response?.status || 0);
+      const msg = String(e?.message ?? "");
+      const is429 = status === 429 || /too many requests|rate/i.test(msg);
+      if (!is429 || attempt >= maxRetries) throw e;
+
+      const retryAfter =
+        Number(e?.response?.headers?.["retry-after"]) ||
+        Number(e?.headers?.["retry-after"]) ||
+        0;
+
+      const backoffMs =
+        retryAfter > 0
+          ? retryAfter * 1000
+          : Math.min(30000, 500 * 2 ** attempt) +
+            Math.floor(Math.random() * 400);
+
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[LLM] 429 received, retrying in ${backoffMs}ms (attempt ${
+          attempt + 1
+        }/${maxRetries})`
+      );
+      await sleep(backoffMs);
+      attempt++;
+    }
+  }
+}
+
 /** --- Robust JSON parsing for flaky model outputs --- */
 function sanitizeJsonLike(text: string): string {
   let out = String(text ?? "");
@@ -137,28 +183,52 @@ function getRandomTemp(min = TEMP_MIN, max = TEMP_MAX) {
 }
 
 // ---- call LLM ----
-async function callLLM(content: string, temperature: number) {
+async function callLLM(
+  content: string,
+  temperature: number,
+  extraUser?: string
+) {
   try {
-    return await llm.chat.completions.create({
-      model: LLM_MODEL as string,
-      temperature,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Return ONLY a valid JSON object with keys: topic, difficulty, questions[]. " +
-            "Each question must have: question_text, options (exactly 4 strings), " +
-            "correct_answer (an integer 0–3 indicating the correct option), explanation (optional), tags (array). " +
-            "No code fences. No comments. No string concatenation.",
-        },
-        { role: "user", content },
-      ],
-    });
+    return await withBackoff(() =>
+      llm.chat.completions.create({
+        model: LLM_MODEL as string,
+        temperature,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Return ONLY a valid JSON object with keys: topic, difficulty, questions[]. " +
+              "Each question must have: question_text, options (exactly 4 strings), " +
+              "correct answer (an integer 0–3 indicating the correct option), explanation (optional), tags (array). " +
+              "No code fences. No comments. No string concatenation.",
+          },
+          { role: "user", content },
+          ...(extraUser
+            ? [
+                {
+                  role: "user" as const,
+                  content: `Additional guidance: ${extraUser}`,
+                },
+              ]
+            : []),
+        ],
+      })
+    );
   } catch (e: any) {
+    const msg = String(e?.message ?? "");
+    // friendlier error for OpenRouter privacy gate
+    if (msg.includes("No endpoints found matching your data policy")) {
+      const err: any = new Error(
+        "Provider rejected the call due to privacy policy. Enable Free model publication on OpenRouter or switch to a paid/opt-out model."
+      );
+      err.status = 429;
+      throw err;
+    }
+
     console.error("[LLM HTTP error]", e?.response?.status, e?.response?.data);
-    const err = new Error(
-      e?.response?.data?.error?.message ?? e.message ?? "LLM request failed"
-    ) as any;
+    const err: any = new Error(
+      e?.response?.data?.error?.message ?? e?.message ?? "LLM request failed"
+    );
     err.status = e?.status ?? e?.response?.status ?? 502;
     throw err;
   }
@@ -168,13 +238,14 @@ async function callLLM(content: string, temperature: number) {
 export async function generateQuestions(
   topic: string,
   difficulty: Difficulty,
-  count = 5
+  count = 5,
+  comment?: string
 ) {
   const start = Date.now();
   const userContent = examPrompt(topic, difficulty, count);
 
   // 1) LLM call
-  const resp = await callLLM(userContent, getRandomTemp());
+  const resp = await callLLM(userContent, getRandomTemp(), comment);
   const raw = resp?.choices?.[0]?.message?.content ?? "";
 
   // quick, non-destructive cleanup (keeps your original step)

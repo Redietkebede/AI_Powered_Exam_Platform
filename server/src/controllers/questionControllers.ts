@@ -4,22 +4,28 @@ import { generateQuestions } from "../services/examStructure";
 import { insertQuestion, getQuestions } from "../middleware/qustions";
 import pool from "../config/db";
 
+const LevelMixSchema = z
+  .object({
+    1: z.coerce.number().int().min(0).optional(),
+    2: z.coerce.number().int().min(0).optional(),
+    3: z.coerce.number().int().min(0).optional(),
+    4: z.coerce.number().int().min(0).optional(),
+    5: z.coerce.number().int().min(0).optional(),
+  })
+  .partial()
+  .default({});
 type Level = 1 | 2 | 3 | 4 | 5;
 
 const Extras = z.object({
   // adaptive knobs (editor UI can hide these; good defaults)
   stageSize: z.coerce.number().int().min(1).max(50).default(10),
   bufferFactor: z.coerce.number().int().min(1).max(10).default(4),
-  levelMixPerStage: z
-    .object({
-      1: z.coerce.number().int().min(0).optional(),
-      2: z.coerce.number().int().min(0).optional(),
-      3: z.coerce.number().int().min(0).optional(),
-      4: z.coerce.number().int().min(0).optional(),
-      5: z.coerce.number().int().min(0).optional(),
-    })
-    .optional(),
+  levelMixPerStage: LevelMixSchema.optional(),
+  poolMultiplier: z.coerce.number().int().min(1).max(6).default(3),
+  comment: z.string().max(1000).optional().optional(),
 });
+
+// put this near the top with other zod schemas
 
 // Branch A: current shape { topic, difficulty, count } + extras
 const BranchA = z
@@ -49,7 +55,9 @@ const BranchB = z
   }));
 
 // Final schema: accepts both, returns the normalized shape
-export const ReqSchema = BranchA.or(BranchB);
+export const ReqSchema = z.union([BranchA, BranchB]);
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // In your handler:
 // const { topic, difficulty, count, stageSize, bufferFactor, levelMixPerStage } = ReqSchema.parse(req.body);
@@ -379,41 +387,63 @@ const norm = (s: unknown) =>
  *  Generates only the **deficit** per level (status = 'draft').
  *  ───────────────────────────────────────────────────────────────────── */
 
-
 export const createQuestions: RequestHandler = async (req, res) => {
   try {
-    // Parse with your existing Zod schema (leave as-is)
+    console.log("[/api/questions/generate] raw body:", req.body);
+
+    // Keep your existing request validation
     const parsed = ReqSchema.parse(req.body) as any;
 
-    const topic: string = String(parsed.topic ?? "");
+    const topic: string = String(parsed.topic ?? "").trim();
     const count: number = Math.max(1, Number(parsed.count ?? 1));
-    const stageSizeIn: number | undefined = Number.isFinite(parsed.stageSize)
+
+    const stageSizeIn: number | undefined = Number.isFinite(
+      Number(parsed.stageSize)
+    )
       ? Number(parsed.stageSize)
       : undefined;
+
     const bufferFactorIn: number | undefined = Number.isFinite(
-      parsed.bufferFactor
+      Number(parsed.bufferFactor)
     )
       ? Number(parsed.bufferFactor)
       : undefined;
+
     const levelMixPerStageIn: Partial<Record<Level, number>> | undefined =
       parsed.levelMixPerStage;
+
     const poolMultiplierIn: number | undefined =
       parsed.poolMultiplier != null &&
       Number.isFinite(Number(parsed.poolMultiplier))
         ? Number(parsed.poolMultiplier)
         : undefined;
 
+    const comment: string | undefined =
+      typeof parsed.comment === "string" && parsed.comment.trim()
+        ? parsed.comment.trim()
+        : undefined;
+    const isDev = process.env.NODE_ENV === "development";
+    const llmProvider = String(
+      process.env.LLM_PROVIDER || process.env.OPENROUTER_PLAN || ""
+    ).toLowerCase();
+    const isFreeTier = isDev || llmProvider === "openrouter_free";
+
+    const poolMultiplierNorm =
+      poolMultiplierIn != null && Number.isFinite(poolMultiplierIn)
+        ? Math.max(1, Math.min(6, Math.floor(poolMultiplierIn)))
+        : 3;
+
+    const effectivePoolMultiplier = isFreeTier ? 1 : poolMultiplierNorm;
+
     // ────────────────────────────────────────────────────────────────────
-    // Helper: build a compact plan when poolMultiplier is present.
-    //   - Uses the same 1..5 difficulty weights as your stage mix.
-    //   - Produces { expectedDrawPerLevel, requiredPerLevel } like your
-    //     buffered planner so the rest of the code remains unchanged.
+    // Compact planner (used when poolMultiplier is provided)
     // ────────────────────────────────────────────────────────────────────
     const planCompact = (params: {
       examQuestions: number;
-      poolMultiplier: number; // e.g. 2 → ~2× exam size total pool
+      poolMultiplier: number;
       levelMix?: Partial<Record<Level, number>>;
     }) => {
+      // same weights style you use elsewhere (center-heavy on 3)
       const defMix: Record<Level, number> = { 1: 1, 2: 2, 3: 4, 4: 2, 5: 1 };
       const mix: Record<Level, number> = {
         1: params.levelMix?.[1] ?? defMix[1],
@@ -422,8 +452,10 @@ export const createQuestions: RequestHandler = async (req, res) => {
         4: params.levelMix?.[4] ?? defMix[4],
         5: params.levelMix?.[5] ?? defMix[5],
       };
+
       const W = Math.max(1, mix[1] + mix[2] + mix[3] + mix[4] + mix[5]);
 
+      // total pool scales with multiplier (never smaller than exam size)
       const totalPool = Math.max(
         params.examQuestions,
         Math.ceil(params.examQuestions * params.poolMultiplier)
@@ -445,10 +477,12 @@ export const createQuestions: RequestHandler = async (req, res) => {
       };
 
       (Object.keys(mix) as unknown as Level[]).forEach((L) => {
+        // how many we *expect* to draw in the final exam by level
         expectedDrawPerLevel[L] = Math.max(
           0,
           Math.ceil((params.examQuestions * (mix[L] ?? 0)) / W)
         );
+        // how many we *need in the bank* for that level (the pool to generate)
         requiredPerLevel[L] = Math.max(
           1,
           Math.ceil((totalPool * (mix[L] ?? 0)) / W)
@@ -465,28 +499,22 @@ export const createQuestions: RequestHandler = async (req, res) => {
 
     // ────────────────────────────────────────────────────────────────────
     // Choose planning mode:
-    //   * compact (small pool) if poolMultiplier is provided
-    //   * buffered (your original) otherwise, but with safe defaults
-    //     so we don’t blow up tiny requests into 40+ questions.
+    //   * compact if poolMultiplier is present
+    //   * buffered otherwise (with safer defaults so tiny requests don’t explode)
     // ────────────────────────────────────────────────────────────────────
     const reqs =
-      Number.isFinite(poolMultiplierIn) && (poolMultiplierIn as number) > 0
+      Number.isFinite(effectivePoolMultiplier) && effectivePoolMultiplier > 0
         ? planCompact({
             examQuestions: count,
-            poolMultiplier: Math.max(
-              1,
-              Math.min(6, Math.floor(poolMultiplierIn as number))
-            ), // cap sensibly
+            poolMultiplier: effectivePoolMultiplier,
             levelMix: levelMixPerStageIn,
           })
         : (() => {
-            // Keep your buffered logic, but pick compact defaults if caller didn’t send any.
             const wantedStage =
               typeof stageSizeIn === "number" && stageSizeIn > 0
                 ? Math.floor(stageSizeIn)
                 : count;
 
-            // never let stage size exceed the number of questions requested
             const effectiveStageSize = Math.max(
               3,
               Math.min(10, Math.min(wantedStage, count))
@@ -495,7 +523,7 @@ export const createQuestions: RequestHandler = async (req, res) => {
             const effectiveBuffer =
               typeof bufferFactorIn === "number" && bufferFactorIn > 0
                 ? Math.max(1, Math.min(6, Math.floor(bufferFactorIn)))
-                : 2; // smaller default buffer than 4
+                : 2;
 
             const r = computeLevelRequirements({
               examQuestions: count,
@@ -504,7 +532,6 @@ export const createQuestions: RequestHandler = async (req, res) => {
               levelMixPerStage: levelMixPerStageIn,
             });
 
-            // annotate (non-breaking extra fields for your response)
             return {
               ...r,
               mode: "buffered" as const,
@@ -515,7 +542,7 @@ export const createQuestions: RequestHandler = async (req, res) => {
           })();
 
     // ────────────────────────────────────────────────────────────────────
-    // What we already have (draft + published/approved)
+    // Inventory of existing questions (draft + published/approved)
     // ────────────────────────────────────────────────────────────────────
     const existing = await pool.query<{
       difficulty: number;
@@ -548,7 +575,7 @@ export const createQuestions: RequestHandler = async (req, res) => {
       );
     });
 
-    // trackers (for response)
+    // Trackers
     const generatedPerLevel: Record<
       Level,
       { requested: number; generated: number; inserted: number }
@@ -563,13 +590,19 @@ export const createQuestions: RequestHandler = async (req, res) => {
     let totalInserted = 0;
 
     // ────────────────────────────────────────────────────────────────────
-    // Generate only the deficit per level, insert as draft
+    // Generate only the deficit per level; insert as draft
     // ────────────────────────────────────────────────────────────────────
     for (const L of [1, 2, 3, 4, 5] as const) {
       const need = toCreate[L];
       if (need <= 0) continue;
 
-      const payload = await generateQuestions(topic, L, need);
+      const payload = await generateQuestions(
+        topic,
+        L as 1 | 2 | 3 | 4 | 5,
+        need,
+        comment
+      );
+
       const items = (payload?.questions ?? []) as Array<{
         question_text?: string;
         question?: string;
@@ -602,7 +635,7 @@ export const createQuestions: RequestHandler = async (req, res) => {
             : -1;
 
         if (idx < 0 || idx >= 4) {
-          const ai = Number(q?.answerIndex);
+          const ai = Number((q as any)?.answerIndex);
           if (!Number.isNaN(ai) && ai >= 0 && ai < 4) idx = ai;
           else if (!Number.isNaN(ai) && ai >= 1 && ai <= 4) idx = ai - 1;
         }
@@ -641,13 +674,14 @@ export const createQuestions: RequestHandler = async (req, res) => {
           correct_answer: idx,
           explanation: explanationArr,
           tags: tagsArr,
-          status: "draft", // send to Approvals
+          status: "draft",
           type: "MCQ",
         });
 
         generatedPerLevel[L].inserted += 1;
         totalInserted += 1;
       }
+      await delay(250); // slight delay to avoid LLM rate limits
     }
 
     if (totalInserted === 0) {
@@ -662,12 +696,12 @@ export const createQuestions: RequestHandler = async (req, res) => {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Response (keeps fields your FE expects; adds harmless context)
+    // Response
     // ────────────────────────────────────────────────────────────────────
     return res.json({
       inserted: totalInserted,
       topic,
-      difficulty: 3, // placeholder; mixed levels inserted
+      difficulty: 3, // placeholder since mixed levels inserted
       mode: (reqs as any).mode ?? "buffered",
       poolMultiplier: (reqs as any).poolMultiplier ?? undefined,
       examQuestions: count,
@@ -677,7 +711,7 @@ export const createQuestions: RequestHandler = async (req, res) => {
       expectedDrawPerLevel: reqs.expectedDrawPerLevel,
       requiredPerLevel: reqs.requiredPerLevel,
       existingPerLevel: have,
-      resultPerLevel: generatedPerLevel, // requested(deficit)/generated/inserted
+      resultPerLevel: generatedPerLevel,
     });
   } catch (err: any) {
     if (res.headersSent) return;
