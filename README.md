@@ -52,8 +52,8 @@ cd server && npm install
 cd ../client && npm install
 ```
 
-2) Configuration setup 
-Define the following environment variables:
+2) Configuration Setup 
+ Define the following environment variables:
 
 Server (`server/.env`)
 ##### Web server
