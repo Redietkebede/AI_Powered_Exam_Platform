@@ -1,9 +1,9 @@
 import express from 'express';
-import { verifyFirebaseToken } from '../middleware/verifyToken';
+import { verifyToken } from '../middleware/verifyToken';
 
 const router = express.Router();
 
-router.get('/profile', verifyFirebaseToken, (req, res) => {
+router.get('/profile', verifyToken, (req, res) => {
   res.json({ message: 'Protected route!', uid: req.user?.uid });
 });
 
